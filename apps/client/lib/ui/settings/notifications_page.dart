@@ -1,9 +1,17 @@
-/// Settings › Notifications (decision 161, slice 161-3). The account-level
-/// sections only; "This device" at the top is reserved for another slice.
+/// Settings › Notifications (decisions 161-3 and 161-4): the account-level
+/// sections, and "This device" at the top.
+///
+/// Two different stores, deliberately: anything that changes what the
+/// server *sends* ([DeviceNotificationPrefsState], over
+/// `/v1/notifications/device`) is on the server, because a closed app
+/// cannot filter a push it never received; anything that only changes how
+/// *this* device renders what arrives ([ThisDeviceLocalPrefs] — sound,
+/// macOS's keep-running toggle) stays local.
 library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -11,23 +19,31 @@ import '../../agent/agent_api.dart' show AgentRefusal;
 import '../../agent/agent_models.dart' show providerLabel;
 import '../../agent/agent_state.dart' show agentApi, agentOverviewProvider;
 import '../../agent/agent_widgets.dart' show clockAt;
+import '../../agent/desktop_notifications.dart';
+import '../../agent/desktop_platform.dart';
+import '../../agent/device_notification_prefs_state.dart';
 import '../../agent/notifications_models.dart';
 import '../../agent/notifications_state.dart';
+import '../../agent/this_device_local_prefs.dart';
 import '../controls.dart';
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
 import '../widgets.dart' show StormInput;
 import 'settings_widgets.dart';
 
-const _kKindLabels = {
+const _kDeviceClassLabels = {
   'needs_you': 'Needs you',
-  'delete_request': 'Delete requests',
-  'finished': 'Finished its turn',
-  'error': 'Hit an error',
-  'usage_limit': 'Usage limit',
-  'host_offline': 'Host offline',
-  'child_finished': 'Child finished',
-  'stopped_working': 'Stopped working',
+  'delete_requests': 'Delete requests',
+  'finished': 'Finished',
+  'errors': 'Errors',
+  'agent_messages': 'Agent messages',
+  'hosts': 'Hosts',
+};
+
+const _kPreviewLabels = {
+  'full': 'Full text',
+  'session': 'Session name only',
+  'storm': '"Storm" only',
 };
 
 /// Presets for `finished`/`host_offline`'s threshold, in seconds.
@@ -209,6 +225,7 @@ class _NotificationsPageBodyState
       title: 'Notifications',
       intro: 'What Storm tells you about, and when.',
       children: [
+        const _ThisDeviceSection(),
         const GroupLabel('What Storm tells you about', bottom: 10),
         for (final kind in kNotificationEventKinds)
           _EventRow(
@@ -394,7 +411,7 @@ class _EventRow extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SettingsRow(
-            label: _kKindLabels[kind] ?? kind,
+            label: kNotificationKindLabels[kind] ?? kind,
             divider: onThreshold == null,
             trailing: StormToggle(
               key: Key('notify-event-$kind'),
@@ -414,7 +431,7 @@ class _EventRow extends StatelessWidget {
               onSelected: onThreshold,
             ),
             SizedBox(height: t.sp),
-            Container(height: t.bw, color: t.border),
+            const SettingsDivider(),
           ],
         ],
       ),
@@ -602,5 +619,222 @@ class _PauseControlState extends State<_PauseControl> {
         ],
       ),
     );
+  }
+}
+
+/// "This device" (decision 161, slice 161-4): nothing on phones or web,
+/// where there is no OS notification to configure and no background
+/// stream to keep open.
+class _ThisDeviceSection extends ConsumerStatefulWidget {
+  const _ThisDeviceSection();
+
+  @override
+  ConsumerState<_ThisDeviceSection> createState() => _ThisDeviceSectionState();
+}
+
+class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
+  DesktopPermissionStatus? _permission;
+
+  @override
+  void initState() {
+    super.initState();
+    if (isDesktopPlatform) unawaited(_checkPermission());
+  }
+
+  Future<void> _checkPermission() async {
+    final notifier = ref.read(desktopNotifierProvider);
+    final status = await notifier?.permissionStatus();
+    if (!mounted) return;
+    setState(() => _permission = status);
+  }
+
+  String get _permissionLabel => switch (_permission) {
+    null => 'Checking…',
+    DesktopPermissionStatus.unavailable => 'No notification service',
+    DesktopPermissionStatus.notAsked => 'Not asked yet',
+    DesktopPermissionStatus.denied => 'Blocked in system settings',
+    DesktopPermissionStatus.allowed ||
+    DesktopPermissionStatus.notApplicable => 'Allowed',
+  };
+
+  // Review item G: once a show has actually failed, the delivery row says
+  // so too — not just the OS permission row below it, which only answers
+  // once `_checkPermission` has run.
+  String _deliveryStatus(DesktopNotifier? notifier) {
+    if (notifier?.unavailable ?? false) return 'No notification service';
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.macOS => 'While Storm runs',
+      _ => 'Only while Storm is open',
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isDesktopPlatform) return const SizedBox.shrink();
+    final deviceState = ref.watch(deviceNotificationPrefsProvider);
+    final local = ref.watch(thisDeviceLocalPrefsProvider);
+    final notifier = ref.watch(desktopNotifierProvider);
+    if (deviceState == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: Listenable.merge([deviceState, local, ?notifier]),
+      builder: (context, _) => _body(context, deviceState, local, notifier),
+    );
+  }
+
+  Widget _body(
+    BuildContext context,
+    DeviceNotificationPrefsState deviceState,
+    ThisDeviceLocalPrefs local,
+    DesktopNotifier? notifier,
+  ) {
+    final t = context.tokens;
+    // Review item 12: never "Loading…" — [DeviceNotificationPrefsState]
+    // seeds [prefs] with this platform's own default the moment it is
+    // constructed, so the section is usable immediately and only quietly
+    // updates once the real row answers.
+    final prefs = deviceState.prefs;
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const GroupLabel('This device', bottom: 10),
+          SettingsRow(
+            label: 'Notifications on this device',
+            trailing: StormToggle(
+              key: const Key('device-notify-enabled'),
+              value: prefs.enabled,
+              onChanged: (v) =>
+                  _guard(context, () => deviceState.setEnabled(v)),
+            ),
+          ),
+          SettingsRow(label: 'Delivery', sub: _deliveryStatus(notifier)),
+          SettingsRow(
+            label: 'OS permission',
+            sub: _permissionLabel,
+            trailing: _permission == DesktopPermissionStatus.denied
+                ? TextAction(
+                    key: const Key('device-open-system-settings'),
+                    label: 'Open system settings',
+                    onTap: () => unawaited(
+                      ref
+                          .read(desktopNotifierProvider)
+                          ?.openSystemNotificationSettings(),
+                    ),
+                  )
+                : null,
+          ),
+          SettingsRow(
+            label: 'Show',
+            divider: false,
+            trailing: ChoiceChips<String>(
+              key: const Key('device-preview'),
+              options: [
+                for (final level in kDevicePreviewLevels)
+                  ChoiceOption(level, _kPreviewLabels[level] ?? level),
+              ],
+              selected: prefs.preview,
+              onSelected: (v) =>
+                  _guard(context, () => deviceState.setPreview(v)),
+            ),
+          ),
+          SizedBox(height: t.sp * 1.5),
+          GroupLabel('Send to this device', top: t.sp),
+          for (final kind in kDeviceNotificationClasses)
+            SettingsRow(
+              label: _kDeviceClassLabels[kind] ?? kind,
+              // The last class still on can't be turned off here (review
+              // item 7): `classes: []` means *every* class, so removing
+              // the only name left would turn every other class back on
+              // instead of leaving none — the opposite of this toggle's
+              // own meaning. The main switch above is the only way to
+              // turn everything off.
+              sub: prefs.classOn(kind) && _onClassCount(prefs) <= 1
+                  ? 'Use "Notifications on this device" to turn off the last one'
+                  : null,
+              divider: kind != kDeviceNotificationClasses.last,
+              trailing: StormToggle(
+                key: Key('device-class-$kind'),
+                value: prefs.classOn(kind),
+                enabled: !(prefs.classOn(kind) && _onClassCount(prefs) <= 1),
+                onChanged: (v) => _guard(
+                  context,
+                  () => deviceState.setClasses(_withClass(prefs, kind, v)),
+                ),
+              ),
+            ),
+          SizedBox(height: t.sp * 1.5),
+          SettingsRow(
+            label: 'Sound',
+            divider: false,
+            trailing: StormToggle(
+              key: const Key('device-sound'),
+              value: local.soundOn,
+              onChanged: (v) => local.setSoundOn(v),
+            ),
+          ),
+          if (defaultTargetPlatform == TargetPlatform.macOS)
+            SettingsRow(
+              label: 'Keep Storm running when its window is closed',
+              divider: false,
+              trailing: StormToggle(
+                key: const Key('device-keep-running'),
+                value: local.keepRunningWhenClosed,
+                onChanged: (v) => local.setKeepRunningWhenClosed(v),
+              ),
+            ),
+          SizedBox(height: t.sp * 1.5),
+          SettingsButtonRow(
+            child: StormButton.outline(
+              key: const Key('device-send-test'),
+              label: 'Send a test notification',
+              onPressed: () async {
+                try {
+                  final n = await deviceState.sendTest();
+                  // Raises the OS notification itself, bypassing the
+                  // deliver hint and presence (review item 13): the
+                  // person is looking right at this page, so the normal
+                  // rule would otherwise show nothing or only a toast,
+                  // proving neither permission nor the OS path.
+                  unawaited(ref.read(desktopNotifierProvider)?.forceShow(n));
+                  if (context.mounted) {
+                    settingsToast(context, 'Sent — check this device.');
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    settingsToast(context, describeFailure(e));
+                  }
+                }
+              },
+            ),
+          ),
+          SizedBox(height: t.sp * 3),
+          const SettingsDivider(),
+          SizedBox(height: t.sp * 1.5),
+        ],
+      ),
+    );
+  }
+
+  /// How many of [kDeviceNotificationClasses] are currently on — `[]`
+  /// counts as every one of them.
+  int _onClassCount(DeviceNotificationPrefs prefs) => prefs.classes.isEmpty
+      ? kDeviceNotificationClasses.length
+      : kDeviceNotificationClasses.where(prefs.classOn).length;
+
+  /// [prefs.classes] with [kind] added or removed. `[]` ("every class")
+  /// is expanded to the full explicit list first — there is no way to
+  /// toggle one class off a set that names none, only off a set that
+  /// names all of them.
+  List<String> _withClass(DeviceNotificationPrefs prefs, String kind, bool on) {
+    final current = prefs.classes.isEmpty
+        ? List<String>.from(kDeviceNotificationClasses)
+        : List<String>.from(prefs.classes);
+    if (on) {
+      if (!current.contains(kind)) current.add(kind);
+    } else {
+      current.remove(kind);
+    }
+    return current;
   }
 }

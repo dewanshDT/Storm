@@ -762,5 +762,69 @@ class AgentApi {
     return json is Map ? (json['changed'] as num?)?.toInt() ?? 0 : 0;
   }
 
+  // ---- this device, and presence (decision 161, slice 161-4) ------------
+
+  /// `GET /v1/notifications/device`: this device's own row, created with
+  /// [platform]'s default on first call.
+  Future<DeviceNotificationPrefs> deviceNotificationPrefs({
+    String? platform,
+  }) async => DeviceNotificationPrefs.fromJson(
+    _decode(
+          await _client.get(
+            _uri('/v1/notifications/device', {'platform': ?platform}),
+            headers: _headers,
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  /// `PUT /v1/notifications/device`: only the fields in [patch] change.
+  Future<DeviceNotificationPrefs> putDeviceNotificationPrefs(
+    Map<String, dynamic> patch, {
+    String? platform,
+  }) async => DeviceNotificationPrefs.fromJson(
+    _decode(
+          await _client.put(
+            _uri('/v1/notifications/device', {'platform': ?platform}),
+            headers: _headers,
+            body: jsonEncode(patch),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  /// `GET /v1/notifications/devices`: every paired device's row, read-only.
+  Future<List<NotificationDeviceRow>> notificationDevices() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/notifications/devices'), headers: _headers),
+    );
+    return [
+      for (final d in json as List)
+        NotificationDeviceRow.fromJson(d as Map<String, dynamic>),
+    ];
+  }
+
+  /// `POST /v1/notifications/presence`: `state` is `active` or
+  /// `background`; [openSessionId] is the session this device currently
+  /// has open, if any — best-effort, never retried (the next connect or
+  /// change carries the current truth anyway).
+  Future<void> setPresence(
+    String connectionId,
+    String state, {
+    String? openSessionId,
+  }) async {
+    _decode(
+      await _client.post(
+        _uri('/v1/notifications/presence'),
+        headers: _headers,
+        body: jsonEncode({
+          'connection_id': connectionId,
+          'state': state,
+          'open_session': ?openSessionId,
+        }),
+      ),
+    );
+  }
+
   void dispose() => _client.close();
 }

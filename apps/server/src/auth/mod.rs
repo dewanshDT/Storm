@@ -27,6 +27,7 @@
 pub mod account;
 pub mod authz;
 pub mod db;
+pub mod device_prefs;
 pub mod devices;
 pub mod hosts;
 pub mod identity;

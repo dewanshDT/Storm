@@ -27,6 +27,7 @@ import '../ui/decision_strip.dart' show DecisionLayout;
 import '../ui/surfaces.dart' show showStormSheet;
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
+import 'agent_events.dart' show AgentEvents, agentEventsProvider;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
@@ -95,6 +96,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       if (_focus.hasFocus) ref.read(sessionControllerProvider(_id))?.focus();
     });
     _markNotificationsRead();
+    _reportSessionOpen();
     agentSessionOpened.addListener(_onOpened);
   }
 
@@ -129,6 +131,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       _laterFor = null;
       _wroteNote = null;
       _markNotificationsRead();
+      _reportSessionOpen();
     }
     if (old.tab != widget.tab) _wroteNote = null;
   }
@@ -140,9 +143,29 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     unawaited(ref.read(notificationsStateProvider)?.markSessionRead(id));
   }
 
+  /// Tells the events stream this device now has [_id] open (161-4): a
+  /// desktop notice about it is skipped entirely rather than toasted, the
+  /// same as it already is while the session is simply the one on screen.
+  ///
+  /// Captured rather than `ref.read` again in [dispose] — by then this
+  /// `State`'s `ref` may no longer be usable, and calling it there was
+  /// observed to throw and corrupt the element tree mid-teardown.
+  AgentEvents? _events;
+
+  void _reportSessionOpen() {
+    _events = ref.read(agentEventsProvider);
+    _events?.setOpenSession(_id);
+  }
+
   @override
   void dispose() {
     agentSessionOpened.removeListener(_onOpened);
+    // Only if nothing else just became the open one: `didUpdateWidget`
+    // already moved it forward when switching sessions in place, and
+    // clearing it here afterwards would wrongly say "nothing is open".
+    if (_events?.openSessionId == _id) {
+      _events?.setOpenSession(null);
+    }
     _focus.dispose();
     super.dispose();
   }

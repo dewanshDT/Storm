@@ -9,6 +9,7 @@ use super::{agent_error, crews_owner};
 use crate::agent::notifications::{Mute, Notification, Prefs, PrefsPatch};
 use crate::api::{ApiError, ApiResult, Shared, bad_request};
 use crate::auth::authz::Actor;
+use crate::auth::device_prefs::{self, DevicePrefs, DeviceRow};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NotificationsPage {
@@ -172,4 +173,133 @@ pub async fn unpause_notifications(state: &Shared, actor: &Actor) -> ApiResult<P
 pub async fn send_test_notification(state: &Shared, actor: &Actor) -> ApiResult<Notification> {
     crews_owner(actor)?;
     state.agent.send_test_notification().map_err(agent_error)
+}
+
+// ---- Device prefs and presence (decision 161, slice 161-4) ---------------
+//
+// Stored in `auth.db`, not `agent.db`: a device belongs to no user and
+// outlives any one account's notification prefs, and it is the table
+// `AM125` already put the revoke cascade on. Still owner-only, for the same
+// reason as everything else in this file (Q18).
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DevicePlatform {
+    #[serde(default)]
+    pub platform: Option<String>,
+}
+
+fn calling_device(device: Option<&str>) -> ApiResult<&str> {
+    device.ok_or_else(|| bad_request("this session has no device"))
+}
+
+pub async fn get_device_prefs(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    platform: Option<&str>,
+) -> ApiResult<DevicePrefs> {
+    crews_owner(actor)?;
+    let device = calling_device(device)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    Ok(auth_db.ensure_device_prefs(device, platform, &now)?)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePrefsPatch {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub classes: Option<Vec<String>>,
+    #[serde(default)]
+    pub preview: Option<String>,
+}
+
+fn validate_device_patch(patch: &DevicePrefsPatch) -> ApiResult<()> {
+    if let Some(classes) = &patch.classes {
+        for class in classes {
+            if !device_prefs::CLASSES.contains(&class.as_str()) {
+                return Err(bad_request(format!("unknown notification class {class:?}")));
+            }
+        }
+    }
+    if let Some(preview) = &patch.preview
+        && !device_prefs::PREVIEWS.contains(&preview.as_str())
+    {
+        return Err(bad_request(format!("unknown preview level {preview:?}")));
+    }
+    Ok(())
+}
+
+pub async fn put_device_prefs(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    platform: Option<&str>,
+    patch: DevicePrefsPatch,
+) -> ApiResult<DevicePrefs> {
+    crews_owner(actor)?;
+    validate_device_patch(&patch)?;
+    let device = calling_device(device)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    auth_db.ensure_device_prefs(device, platform, &now)?;
+    Ok(auth_db.update_device_prefs(
+        device,
+        patch.enabled,
+        patch.classes.as_deref(),
+        patch.preview.as_deref(),
+        &now,
+    )?)
+}
+
+/// `GET /v1/notifications/devices`: read-only, never creates a row — that
+/// is [`get_device_prefs`]'s job, and only for the calling device.
+pub async fn list_device_notification_rows(
+    state: &Shared,
+    actor: &Actor,
+) -> ApiResult<Vec<DeviceRow>> {
+    crews_owner(actor)?;
+    let auth_db = state.auth_db.lock().await;
+    Ok(auth_db.list_device_prefs()?)
+}
+
+/// `POST /v1/notifications/presence`: in-memory only (161-4's deliver
+/// hint), never persisted — a restart simply forgets who was active, same
+/// as the session list's own live state. Updates the *named connection*'s
+/// presence — never creates one (that only ever happens on connect) — so
+/// a device whose stream has already dropped gets a 404, not a ghost
+/// entry that outlives it.
+pub fn set_presence(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    connection_id: &str,
+    raw_state: &str,
+    open_session: Option<&str>,
+) -> ApiResult<()> {
+    crews_owner(actor)?;
+    let device = calling_device(device)?;
+    if connection_id.is_empty() {
+        return Err(bad_request("connection_id must not be empty"));
+    }
+    let active = match raw_state {
+        "active" => true,
+        "background" => false,
+        _ => return Err(bad_request("state must be \"active\" or \"background\"")),
+    };
+    let updated = state.agent.update_presence(
+        connection_id,
+        device,
+        active,
+        open_session.map(str::to_string),
+    );
+    if !updated {
+        return Err(ApiError(
+            axum::http::StatusCode::NOT_FOUND,
+            "no such live connection".into(),
+        ));
+    }
+    Ok(())
 }

@@ -5,8 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'agent/agent_state.dart' show sessionKeepAliveProvider;
+import 'agent/desktop_notifications.dart'
+    show
+        NotificationTapNone,
+        NotificationTapSession,
+        desktopNotifierProvider,
+        notificationTapped;
 import 'agent/oauth_links.dart';
 import 'router.dart';
 import 'state/app_state.dart';
@@ -49,6 +56,9 @@ class _StormAppState extends ConsumerState<StormApp>
       OAuthLinks.instance.orphans.addListener(_showIntegrations);
       OAuthLinks.instance.start();
     }
+    // A tap on a desktop OS notification (decision 161, slice 161-4):
+    // this process was not necessarily in front when it happened.
+    notificationTapped.addListener(_onNotificationTapped);
     // Once, at startup. **Not `addPostFrameCallback`** — that fires after the
     // first frame, which is well before `settingsProvider` has finished
     // loading preferences and the keychain, so the check ran against a null
@@ -61,12 +71,40 @@ class _StormAppState extends ConsumerState<StormApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     OAuthLinks.instance.orphans.removeListener(_showIntegrations);
+    notificationTapped.removeListener(_onNotificationTapped);
     super.dispose();
   }
 
   void _showIntegrations() {
     if (OAuthLinks.instance.orphans.value.isEmpty) return;
     ref.read(routerProvider).go(Routes.integrations);
+  }
+
+  /// Brings the window forward, then routes — in that order, so the
+  /// person sees Storm come to the front onto the right place rather than
+  /// a flash of wherever it last was.
+  void _onNotificationTapped() {
+    final target = notificationTapped.value;
+    if (target == null) return;
+    notificationTapped.value = null;
+    unawaited(_bringToFront());
+    switch (target) {
+      case NotificationTapSession(:final sessionId):
+        ref.read(routerProvider).go(Routes.agentSession(sessionId));
+      case NotificationTapNone():
+        break; // Bringing the window forward above is all there is.
+    }
+  }
+
+  Future<void> _bringToFront() async {
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (_) {
+      // Not a desktop window (shouldn't happen: only DesktopNotifier sets
+      // notificationTapped, and it exists only on desktop) — nothing to
+      // bring forward.
+    }
   }
 
   @override
@@ -107,6 +145,10 @@ class _StormAppState extends ConsumerState<StormApp>
     final choice = settings?.theme ?? ThemeChoice.initial;
     final fontSize = settings?.fontSize;
     final router = ref.watch(routerProvider);
+    // Alive for as long as the app itself is (161-4): watched here, not
+    // read, so Riverpod keeps the plugin registration and the events
+    // subscription up rather than tearing it down between frames.
+    ref.watch(desktopNotifierProvider);
 
     // Both members of the chosen family, and the mode: with `system`,
     // Flutter follows the platform's brightness live (decision 160). A

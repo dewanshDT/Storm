@@ -194,7 +194,8 @@ void main() {
         }),
       );
       final c = StreamController<AgentEvent>();
-      final events = AgentEvents(() => c.stream)..start(followLifecycle: false);
+      final events = AgentEvents((_) => c.stream)
+        ..start(followLifecycle: false);
       NotificationsState(api, events);
       await settle();
       expect(gets, 1, reason: 'the constructor backfills once');
@@ -245,7 +246,8 @@ void main() {
         }),
       );
       final c = StreamController<AgentEvent>();
-      final events = AgentEvents(() => c.stream)..start(followLifecycle: false);
+      final events = AgentEvents((_) => c.stream)
+        ..start(followLifecycle: false);
       final state = NotificationsState(api, events);
       await settle();
       expect(state.items.map((n) => n.id).toSet(), {'n1', 'n2'});
@@ -287,7 +289,7 @@ void main() {
           }),
         );
         final c = StreamController<AgentEvent>();
-        final events = AgentEvents(() => c.stream)
+        final events = AgentEvents((_) => c.stream)
           ..start(followLifecycle: false);
         final state = NotificationsState(api, events);
         // The backfill's own GET is blocked on `hold`; a push heard now
@@ -472,7 +474,7 @@ void main() {
   group('server-sourced toasts (decision 161 review, item 10)', () {
     late List<StreamController<AgentEvent>> opens;
 
-    Stream<AgentEvent> open() {
+    Stream<AgentEvent> open(AgentPresence presence) {
       final c = StreamController<AgentEvent>();
       opens.add(c);
       return c.stream;

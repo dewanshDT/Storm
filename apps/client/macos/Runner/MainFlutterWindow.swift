@@ -19,6 +19,7 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: flutterViewController)
     StormLinks.shared.attach(flutterViewController.engine.binaryMessenger)
     StormClipboard.attach(flutterViewController.engine.binaryMessenger)
+    StormLifecycle.attach(flutterViewController.engine.binaryMessenger)
 
     super.awakeFromNib()
 
