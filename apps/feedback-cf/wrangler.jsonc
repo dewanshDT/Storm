@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "storm-feedback",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [
+    { "binding": "FEEDBACK", "bucket_name": "storm-feedback-reports" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "RATE_LIMITER", "class_name": "RateLimiter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }
+  ],
+  "triggers": {
+    "crons": ["17 3 * * *"]
+  }
+}
