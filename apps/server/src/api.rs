@@ -81,6 +81,15 @@ pub struct AppState {
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
+    /// Every host's display name, by id — enrolled and removed (decision
+    /// 153) — mirroring `auth_db.host_names()`. A session view needs this on
+    /// every push, which an `await` on `auth_db`'s mutex cannot be: that
+    /// mutex is also held across `check_password`'s Argon2id verify (see its
+    /// doc comment below), so a view push would otherwise queue behind a
+    /// sign-in's KDF. A `std::sync::RwLock` is never held across an `.await`.
+    /// Loaded once at boot, then kept in step by every write to a host's
+    /// name (`ops::enroll_host`, `rename_host`, `remove_host`).
+    pub host_names: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// The server's listen address, used as the `addr` hint in QR payloads.
     pub listen_addr: String,
     /// Decides whether an actor may reach a vault.
@@ -4620,6 +4629,7 @@ pub(crate) mod tests {
         let agent = Arc::new(crate::agent::AgentManager::open(&state_dir).unwrap());
         let gateway =
             Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
+        let host_names = auth_db.host_names().unwrap();
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -4634,6 +4644,7 @@ pub(crate) mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            host_names: Arc::new(std::sync::RwLock::new(host_names)),
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),
@@ -17412,6 +17423,51 @@ pub(crate) mod tests {
         assert_eq!(others(), before);
         assert_eq!(events().await, [audited]);
         assert_eq!(state.agent.get("ags_C1").unwrap().owner_user_id, owner);
+    }
+
+    /// A latency regression (2026-11): `name_roles` used to lock `auth_db`
+    /// for every session view, and `check_password`'s Argon2id verify holds
+    /// that same lock for its whole duration (`AppState::auth_db`'s doc
+    /// comment) — so a slow sign-in starved every concurrent push.
+    /// `host_names` is the cache that keeps a view off that lock.
+    #[tokio::test]
+    async fn a_session_view_never_waits_on_the_auth_db_lock() {
+        let dir = tempdir::TempDir::new("storm-161-auth-lock").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, _child) = f.tree().await;
+        let guard = f.state.auth_db.lock().await;
+        let view = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            crate::ops::get_session(&f.state, &parent),
+        )
+        .await;
+        drop(guard);
+        assert!(
+            view.is_ok(),
+            "a session view waited on auth_db, which a slow sign-in can hold"
+        );
+        assert!(view.unwrap().is_ok());
+    }
+
+    /// The cache stays correct: a host's rename reaches the next view.
+    #[tokio::test]
+    async fn a_host_rename_shows_in_the_next_session_view() {
+        let dir = tempdir::TempDir::new("storm-161-host-rename").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, _child) = f.tree().await;
+        let host_id = f.state.agent.get(&parent).unwrap().host_id;
+        let owner = Actor::Session {
+            user_id: f.owner.clone(),
+        };
+        crate::ops::rename_host(&f.state, &owner, &host_id, "Renamed Host")
+            .await
+            .ok()
+            .unwrap();
+        let view = crate::ops::get_session(&f.state, &parent)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(view.host_name.as_deref(), Some("Renamed Host"));
     }
 
     /// `end_agent` through the gateway (145a): the target's `end` at once;
