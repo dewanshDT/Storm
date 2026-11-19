@@ -1202,6 +1202,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         );
     }
 
+    let host_names = auth_db.host_names().context("loading host names")?;
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1213,6 +1214,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         agent_writes: std::sync::atomic::AtomicBool::new(agent_writes),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+        host_names: Arc::new(std::sync::RwLock::new(host_names)),
         listen_addr,
         vault_policy: Arc::new(crate::auth::authz::StormPolicy),
         // One hasher for the process, so the semaphore actually bounds
