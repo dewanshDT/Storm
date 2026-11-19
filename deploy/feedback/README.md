@@ -87,19 +87,15 @@ tokens or diagnostics bundle (decision 162d/162e).
 ## How it stays idempotent
 
 Each report is tracked by the intake id in `STATE_DIR/state.json`
-(`id -> FB ref`). If a run crashes between creating a note and deleting the
-report from the Worker, the next run finds the note already there — by the
-state file, or, if that's lost too, by scanning the vault's `Inbox/` folder
-for a note whose `intake:` frontmatter matches — and finishes just the
-delete rather than creating a duplicate.
-
-One caveat worth knowing: that same "already synced" check skips straight to
-the delete, so a crash after the note is created but before the
-`Feedback.md` bullet is added leaves that one line missing (the note itself
-is still there and findable). This matches the idempotency contract in the
-spec; if that gap turns out to matter in practice, the fix is to also retry
-the `Feedback.md` and screenshot steps — both already idempotent — on the
-"already synced" path rather than skipping them outright.
+(`id -> FB ref`). If a run crashes anywhere after creating a note — before
+the screenshot upload, before the `Feedback.md` line, or before the Worker
+delete — the next run finds the note already there (by the state file, or,
+if that's lost too, by scanning the vault's `Inbox/` folder for a note whose
+`intake:` frontmatter matches) and redoes only the steps after note
+creation: the screenshot attachment (its `PUT` just overwrites the same
+bytes) and the `Feedback.md` line (a no-op once the ref is already in the
+section), then the Worker delete. Only the note creation itself is ever
+skipped on a rerun — the one step that genuinely isn't safe to repeat.
 
 ## Uninstall
 

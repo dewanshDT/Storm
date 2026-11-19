@@ -1062,6 +1062,43 @@ class IdempotencyTests(FakeServersTestCase):
         self.assertEqual(len(self.vault.notes), notes_before)
         self.assertNotIn("rep-crash-2", self.worker_state.reports)
 
+    def test_crash_after_note_create_but_before_feedback_md_insert(self):
+        self.worker_state.add_report(make_report("rep-crash-3", text="crash before the bullet"))
+
+        # Simulate a first run that created the note and recorded state, but
+        # crashed before `_finish_sync` ever ran — so no screenshot step
+        # (none needed here) and, critically, no `Feedback.md` line yet.
+        state = fs.State.load(self.state_dir)
+        inbox = fs.InboxIndex(self.cfg, self.storm_state.access_token)
+        report = dict(self.worker_state.reports["rep-crash-3"])
+        report["has_screenshot"] = False
+        ref = fs.allocate_ref(state, inbox)
+        path = f"{self.cfg.feedback_folder}/Inbox/{ref}.md"
+        fs.api_create_note(
+            self.cfg.storm_url, self.storm_state.access_token, self.cfg.vault, path,
+            fs.render_note(ref, report),
+        )
+        state.synced["rep-crash-3"] = ref
+        state.save()
+
+        content_before = self._feedback_md_content()
+        self.assertNotIn(ref, content_before)
+        notes_before = len(self.vault.notes)
+
+        rc, _ = self._capture_run()
+        self.assertEqual(rc, 0)
+
+        # No duplicate note — the create was correctly skipped on rerun.
+        self.assertEqual(len(self.vault.notes), notes_before)
+        # But the bullet, which the crashed run never got to, is now there —
+        # exactly once. (`ref` itself appears twice per bullet — once in the
+        # wikilink's path, once as its display text — so this counts the
+        # whole link rather than the bare ref.)
+        content_after = self._feedback_md_content()
+        link = f"[[{self.cfg.feedback_folder}/Inbox/{ref}|{ref}]]"
+        self.assertEqual(content_after.count(link), 1)
+        self.assertNotIn("rep-crash-3", self.worker_state.reports)
+
     def test_rerun_with_nothing_pending_is_a_silent_no_op(self):
         rc, _ = self._capture_run()
         self.assertEqual(rc, 0)

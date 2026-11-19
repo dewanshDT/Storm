@@ -962,39 +962,15 @@ def allocate_ref(state, inbox):
 # ---------------------------------------------------------------------------
 
 
-def sync_report(cfg, access_token, state, inbox, report):
-    report_id = report.get("id")
-    if not report_id:
-        raise ValueError("report has no id")
-
-    ref = state.synced.get(report_id)
-    if ref is None:
-        ref = inbox.find_by_intake(report_id)
-        if ref is not None:
-            state.synced[report_id] = ref
-            state.save()
-
-    if ref is not None:
-        # Already landed in the vault (local state, or the vault-scan
-        # fallback) — a previous run must have crashed between creating the
-        # note and deleting it from the Worker. Finish the one step left.
-        worker_delete_report(cfg.intake_url, cfg.sync_token, report_id)
-        log("report_already_synced", id=report_id, ref=ref)
-        return
-
-    ref = allocate_ref(state, inbox)
-    path = f"{cfg.feedback_folder}/Inbox/{ref}.md"
-    content = render_note(ref, report)
-    api_create_note(cfg.storm_url, access_token, cfg.vault, path, content)
-
-    # Recorded right away: if anything below fails, the next run finds this
-    # note (via state, or the vault scan if state is lost) and skips to the
-    # delete rather than creating FB-#### twice.
-    state.synced[report_id] = ref
-    state.save()
-
-    has_screenshot = bool(report.get("has_screenshot"))
-    if has_screenshot:
+def _finish_sync(cfg, access_token, ref, report):
+    """Steps (c) and (d): the screenshot attachment and the `Feedback.md`
+    line. Both are idempotent — the attachment PUT just overwrites the same
+    bytes, and `update_feedback_index` is a no-op once `ref` is already in
+    the section — so this runs whether the note was just created or was
+    already there from a crashed earlier run. A crash between the note and
+    `Feedback.md` must not leave that line missing forever."""
+    if report.get("has_screenshot"):
+        report_id = report.get("id")
         png = worker_get_screenshot(cfg.intake_url, cfg.sync_token, report_id)
         if png:
             api_put_attachment(
@@ -1010,8 +986,41 @@ def sync_report(cfg, access_token, state, inbox, report):
     version = client.get("version") or "unknown"
     update_feedback_index(cfg, access_token, ref, report.get("kind") or "other", title, version)
 
+
+def sync_report(cfg, access_token, state, inbox, report):
+    report_id = report.get("id")
+    if not report_id:
+        raise ValueError("report has no id")
+
+    ref = state.synced.get(report_id)
+    if ref is None:
+        ref = inbox.find_by_intake(report_id)
+        if ref is not None:
+            state.synced[report_id] = ref
+            state.save()
+
+    if ref is None:
+        ref = allocate_ref(state, inbox)
+        path = f"{cfg.feedback_folder}/Inbox/{ref}.md"
+        content = render_note(ref, report)
+        api_create_note(cfg.storm_url, access_token, cfg.vault, path, content)
+
+        # Recorded right away: if anything below fails, the next run finds
+        # this note (via state, or the vault scan if state is lost) and
+        # redoes only the idempotent steps that follow — never the create.
+        state.synced[report_id] = ref
+        state.save()
+        log("report_note_created", id=report_id, ref=ref)
+    else:
+        # Already landed in the vault (local state, or the vault-scan
+        # fallback) — a previous run must have crashed somewhere after
+        # creating the note. `_finish_sync` below redoes the screenshot and
+        # `Feedback.md` steps rather than assuming they finished too.
+        log("report_already_synced", id=report_id, ref=ref)
+
+    _finish_sync(cfg, access_token, ref, report)
     worker_delete_report(cfg.intake_url, cfg.sync_token, report_id)
-    log("report_synced", id=report_id, ref=ref, has_screenshot=has_screenshot)
+    log("report_synced", id=report_id, ref=ref, has_screenshot=bool(report.get("has_screenshot")))
 
 
 def run(cfg):
