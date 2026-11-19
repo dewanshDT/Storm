@@ -25,6 +25,7 @@ jobs:
       server: ${{ steps.f.outputs.server }}
       relay: ${{ steps.f.outputs.relay }}
       relay_cf: ${{ steps.f.outputs.relay_cf }}
+      feedback: ${{ steps.f.outputs.feedback }}
       feedback_cf: ${{ steps.f.outputs.feedback_cf }}
       runtime: ${{ steps.f.outputs.runtime }}
       diag: ${{ steps.f.outputs.diag }}
@@ -69,6 +70,9 @@ jobs:
               - *vectors
               - apps/relay-cf/**
               - tools/relay-conformance/**
+            feedback:
+              - deploy/feedback/**
+              - docs/srp-vectors.json
             feedback_cf:
               - apps/feedback-cf/**
             runtime:
@@ -228,6 +232,18 @@ jobs:
       - name: relay logs on failure
         if: failure()
         run: cat .dev/conformance-cf.log .dev/conformance-cf-tofu.log || true
+
+  # deploy/feedback/feedback-sync.py (decision 162-6): a standalone script,
+  # not part of the product, so its own lightweight job rather than a step
+  # in `server` — stdlib-only Python, nothing to build or cache.
+  feedback-sync:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.feedback == 'true'
+    name: feedback-sync (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-feedback-sync
 
   # Decision 162c: a leaf crate both apps/server and apps/runtime depend on
   # by path. Its own job for the relay's reason — it is not in either's

@@ -96,11 +96,16 @@ lint:
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-relay-cf test-feedback-cf test-runtime test-diag test-client
+test: test-server test-relay test-relay-cf test-feedback-cf test-runtime test-diag test-client test-feedback-sync
 
 ## test-server: Rust unit tests
 test-server:
 	cd $(SERVER) && cargo test
+
+## test-feedback-sync: the feedback sync service's unit tests (decision 162-6, stdlib only)
+test-feedback-sync:
+	python3 -m py_compile deploy/feedback/feedback-sync.py deploy/feedback/test_feedback_sync.py
+	python3 -m unittest deploy.feedback.test_feedback_sync -v
 
 ## test-relay: storm-relay unit + registration tests
 #
@@ -626,7 +631,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check
