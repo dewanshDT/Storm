@@ -24,6 +24,8 @@ use std::sync::{Arc, RwLock};
 
 pub const REGISTRY_FILE: &str = "vaults.json";
 
+pub const DEFAULT_FEEDBACK_INTAKE_URL: &str = "https://feedback.storm.dev";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultEntry {
     pub id: String,
@@ -209,6 +211,18 @@ pub struct Registry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     discoverable: Option<bool>,
 
+    // Random, never a device id; minted once by `load` if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feedback_enabled: Option<bool>,
+
+    // Absent means the default URL; an explicit empty string means "not
+    // configured".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feedback_intake_url: Option<String>,
+
     /// Relay URLs this server should try to register with (SRP v1 §4.4).
     ///
     /// Here for the same reasons the MCP switches are: it has to survive a
@@ -250,6 +264,9 @@ impl Default for Registry {
             mcp_writable: false,
             agent_writes: Some(false),
             discoverable: None,
+            install_id: None,
+            feedback_enabled: None,
+            feedback_intake_url: None,
             // Off. `#[derive(Default)]` would give the same answer, but this
             // Default is hand-written precisely so nobody has to check.
             relays: Vec::new(),
@@ -293,6 +310,7 @@ impl Registry {
         if !path.exists() {
             return Ok(Self {
                 root: first_run_root.to_path_buf(),
+                install_id: Some(uuid::Uuid::new_v4().to_string()),
                 ..Default::default()
             });
         }
@@ -315,6 +333,9 @@ impl Registry {
         registry
             .agent_writes
             .get_or_insert(registry.mcp_enabled && registry.mcp_writable);
+        registry
+            .install_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
         Ok(registry)
     }
 
@@ -345,6 +366,32 @@ impl Registry {
 
     pub fn set_discoverable(&mut self, on: bool) {
         self.discoverable = Some(on);
+    }
+
+    pub fn install_id(&self) -> &str {
+        self.install_id.as_deref().unwrap_or_default()
+    }
+
+    pub fn feedback_enabled(&self) -> bool {
+        self.feedback_enabled.unwrap_or(true)
+    }
+
+    pub fn set_feedback_enabled(&mut self, on: bool) {
+        self.feedback_enabled = Some(on);
+    }
+
+    pub fn feedback_intake_url(&self) -> &str {
+        self.feedback_intake_url
+            .as_deref()
+            .unwrap_or(DEFAULT_FEEDBACK_INTAKE_URL)
+    }
+
+    pub fn feedback_intake_configured(&self) -> bool {
+        self.feedback_intake_url.as_deref() != Some("")
+    }
+
+    pub fn set_feedback_intake_url(&mut self, url: String) {
+        self.feedback_intake_url = Some(url);
     }
 
     pub fn get(&self, id: &str) -> Option<&VaultEntry> {

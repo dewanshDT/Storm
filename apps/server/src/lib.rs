@@ -34,6 +34,7 @@ mod backup;
 mod db;
 mod diag;
 mod discovery;
+mod feedback;
 mod firewall;
 mod frontmatter;
 mod fsutil;
@@ -1225,6 +1226,10 @@ async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
     }
 
     let host_names = auth_db.host_names().context("loading host names")?;
+    // Decision 162-3: opened before the queue's rows matter to anyone, so
+    // the forwarder below finds whatever a previous run left pending.
+    let feedback =
+        crate::feedback::Feedback::open(&state_dir).context("opening the feedback queue")?;
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1253,7 +1258,12 @@ async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
             nettrust::NetTrust::new(args.test_untrusted_interfaces.clone()),
         ),
         diag_ring,
+        feedback,
     });
+    // Decision 162b: one forwarder for the process's whole life, resuming
+    // whatever the queue already holds — a restart needs nothing special,
+    // since a pending row is simply one whose `next_attempt` is past.
+    tokio::spawn(crate::feedback::forwarder::run(state.clone()));
 
     ops::reconcile_single_user(&state)
         .await

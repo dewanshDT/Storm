@@ -145,11 +145,10 @@ pub struct AppState {
     /// This process's log ring (decision 162c): the same `Ring` the tracing
     /// layer installed at startup writes into, so a diagnostics bundle reads
     /// what actually happened, not a second, unwritten copy.
-    ///
-    /// Read only by [`crate::ops::server_diag`], whose own first production
-    /// caller is decision 162-3's feedback preview.
-    #[allow(dead_code)]
     pub diag_ring: storm_diag::Ring,
+    /// In-app feedback (decision 162b): the preview store and the durable
+    /// send queue. The forwarder reads this through its own `Shared` clone.
+    pub feedback: crate::feedback::Feedback,
 }
 
 pub type Shared = Arc<AppState>;
@@ -465,6 +464,18 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/relays", put(put_relays))
         .route("/v1/config/discovery", put(put_discovery))
+        .route("/v1/config/feedback", put(put_feedback_settings))
+        // 8 MiB: a base64 4 MiB screenshot alone is ~5.4 MiB.
+        .route(
+            "/v1/feedback",
+            get(get_feedback)
+                .post(post_feedback)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/feedback/preview",
+            post(post_feedback_preview).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
         // mint a key" true without a special case — a key never reaches here.
@@ -3661,6 +3672,34 @@ async fn put_discovery(
         .map(Json)
 }
 
+async fn put_feedback_settings(
+    State(state): State<Shared>,
+    Json(body): Json<crate::ops::SetFeedbackSettings>,
+) -> ApiResult<Json<crate::ops::FeedbackStatus>> {
+    crate::ops::set_feedback_settings(&state, body)
+        .await
+        .map(Json)
+}
+
+async fn get_feedback(State(state): State<Shared>) -> Json<crate::ops::FeedbackStatus> {
+    Json(crate::ops::feedback_status(&state).await)
+}
+
+async fn post_feedback_preview(
+    State(state): State<Shared>,
+    Json(body): Json<crate::ops::FeedbackPreviewRequest>,
+) -> ApiResult<Json<crate::ops::FeedbackPreviewResponse>> {
+    crate::ops::feedback_preview(&state, body).await.map(Json)
+}
+
+async fn post_feedback(
+    State(state): State<Shared>,
+    Json(body): Json<crate::ops::FeedbackSendRequest>,
+) -> ApiResult<(StatusCode, Json<crate::ops::FeedbackSendResponse>)> {
+    let sent = crate::ops::feedback_send(&state, body).await?;
+    Ok((StatusCode::ACCEPTED, Json(sent)))
+}
+
 #[derive(Deserialize)]
 struct RelaysBody {
     relays: Vec<String>,
@@ -4665,6 +4704,7 @@ pub(crate) mod tests {
         let gateway =
             Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
         let host_names = auth_db.host_names().unwrap();
+        let feedback = crate::feedback::Feedback::open(&state_dir).unwrap();
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -4689,6 +4729,7 @@ pub(crate) mod tests {
             agent,
             gateway,
             diag_ring: storm_diag::Ring::default(),
+            feedback,
         });
         (
             router(state.clone(), crate::mcp::McpOptions { allowed_hosts }),
@@ -14795,6 +14836,604 @@ pub(crate) mod tests {
         let joined = diag.logs.join("\n");
         assert!(!joined.contains("Secret Vault"), "{joined}");
         assert!(!joined.contains(&host), "no hostname either: {joined}");
+    }
+
+    // ---- in-app feedback (decision 162-3) ----------------------------------
+
+    type FakeRequests = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    type FakeScript = Arc<
+        std::sync::Mutex<std::collections::VecDeque<(StatusCode, Option<u64>, serde_json::Value)>>,
+    >;
+
+    struct FakeIntake {
+        url: String,
+        requests: FakeRequests,
+        script: FakeScript,
+    }
+
+    impl FakeIntake {
+        fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn answer(&self, status: StatusCode, retry_after: Option<u64>, body: serde_json::Value) {
+            self.script
+                .lock()
+                .unwrap()
+                .push_back((status, retry_after, body));
+        }
+    }
+
+    async fn fake_intake_reports(
+        State((requests, script)): State<(FakeRequests, FakeScript)>,
+        body: axum::body::Bytes,
+    ) -> Response {
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        requests.lock().unwrap().push(value);
+        match script.lock().unwrap().pop_front() {
+            Some((status, retry_after, body)) => {
+                let mut res = (status, Json(body)).into_response();
+                if let Some(secs) = retry_after {
+                    res.headers_mut().insert(
+                        axum::http::header::RETRY_AFTER,
+                        secs.to_string().parse().unwrap(),
+                    );
+                }
+                res
+            }
+            None => (
+                StatusCode::CREATED,
+                Json(serde_json::json!({"id": "fake-report"})),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn fake_intake() -> FakeIntake {
+        let requests: FakeRequests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let script: FakeScript = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let app = Router::new()
+            .route("/v1/reports", post(fake_intake_reports))
+            .with_state((requests.clone(), script.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        FakeIntake {
+            url: format!("http://{addr}"),
+            requests,
+            script,
+        }
+    }
+
+    // 30 s of patience: a CI Windows runner is far slower than a dev box
+    // at many small processes and TCP round trips.
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..3000 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    async fn eventually_queue_len(queue: &crate::feedback::queue::Queue, want: i64) {
+        for _ in 0..3000 {
+            if queue.len().await.unwrap_or(-1) == want {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the feedback queue never reached length {want}");
+    }
+
+    struct FeedbackFixture {
+        app: Router,
+        state: Shared,
+        owner_bearer: String,
+    }
+
+    impl FeedbackFixture {
+        fn spawn_forwarder(&self) {
+            tokio::spawn(crate::feedback::forwarder::run(self.state.clone()));
+        }
+
+        async fn set_intake_url(&self, url: &str) {
+            let mut vaults = self.state.vaults.write().await;
+            vaults.registry.set_feedback_intake_url(url.to_string());
+            vaults.registry.save(&self.state.state_dir).unwrap();
+        }
+    }
+
+    async fn feedback_fixture(dir: &FsPath, intake_url: &str) -> FeedbackFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let f = FeedbackFixture {
+            app,
+            state,
+            owner_bearer,
+        };
+        f.set_intake_url(intake_url).await;
+        f
+    }
+
+    fn client_info(screen: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": "0.19.0",
+            "platform": "linux-x86_64",
+            "client_kind": "desktop",
+            "screen": screen,
+            "actions": ["opened session"],
+            "error": null,
+            "connection_log": ["connected"],
+        })
+    }
+
+    async fn preview(
+        f: &FeedbackFixture,
+        kind: &str,
+        include_diagnostics: bool,
+        client: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/feedback/preview",
+                serde_json::json!({"kind": kind, "include_diagnostics": include_diagnostics, "client": client}),
+                &f.owner_bearer,
+            ),
+        )
+        .await
+    }
+
+    async fn submit(
+        f: &FeedbackFixture,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            &f.app,
+            post_json_with_auth("/v1/feedback", body, &f.owner_bearer),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn preview_equals_the_forwarded_bytes() {
+        let dir = tempdir::TempDir::new("storm-feedback-preview-eq").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (status, prev) = preview(&f, "bug", false, client_info("agents/session")).await;
+        assert_eq!(status, StatusCode::OK, "{prev}");
+        let preview_id = prev["preview_id"].as_str().unwrap().to_string();
+
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": preview_id, "kind": "bug", "text": "it broke",
+                "email": "a@b.c",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+        assert_eq!(sent["queued"], true);
+
+        eventually("the intake received the report", || {
+            !intake.requests().is_empty()
+        })
+        .await;
+        let forwarded = intake.requests().remove(0);
+        assert_eq!(forwarded["client"], prev["client"]);
+        assert_eq!(forwarded["bundle"], prev["bundle"]);
+        assert_eq!(forwarded["text"], "it broke");
+        assert_eq!(forwarded["kind"], "bug");
+        assert_eq!(forwarded["email"], "a@b.c");
+        assert_eq!(forwarded["report_id"], sent["report_id"]);
+        assert_eq!(forwarded["schema"], 1);
+        assert!(!forwarded["install_id"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_sends_are_retried_then_delivered() {
+        let dir = tempdir::TempDir::new("storm-feedback-offline").unwrap();
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let f = feedback_fixture(dir.path(), &dead).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "offline"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+        assert_eq!(f.state.feedback.queue.len().await.unwrap(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(
+            f.state.feedback.queue.len().await.unwrap(),
+            1,
+            "still queued while offline"
+        );
+        let intake = fake_intake().await;
+        f.set_intake_url(&intake.url).await;
+
+        eventually("it was delivered", || !intake.requests().is_empty()).await;
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    /// A row the forwarder has already given up waiting on past 7 days
+    /// (scaled under test) is dropped, never retried forever.
+    #[tokio::test]
+    async fn a_send_older_than_the_give_up_deadline_is_dropped() {
+        let dir = tempdir::TempDir::new("storm-feedback-give-up").unwrap();
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let f = feedback_fixture(dir.path(), &dead).await;
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (_, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "ancient"}),
+        )
+        .await;
+        f.state
+            .feedback
+            .queue
+            .backdate_for_tests(sent["report_id"].as_str().unwrap(), "2000-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        f.spawn_forwarder();
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    #[tokio::test]
+    async fn disabled_feedback_sends_nothing() {
+        let dir = tempdir::TempDir::new("storm-feedback-disabled").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let preview_id = prev["preview_id"].as_str().unwrap().to_string();
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], false);
+
+        let (status, body) = preview(&f, "bug", false, client_info("x")).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({"error": "feedback_disabled"})
+            )
+        );
+
+        let (status, body) = submit(
+            &f,
+            serde_json::json!({"preview_id": preview_id, "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({"error": "feedback_disabled"})
+            )
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(intake.requests().is_empty(), "nothing reached the intake");
+
+        let (status, body) = send(&f.app, get_with_auth("/v1/feedback", &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn disabling_feedback_holds_a_queued_send_until_re_enabled() {
+        let dir = tempdir::TempDir::new("storm-feedback-off-queue").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        f.spawn_forwarder();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(intake.requests().is_empty(), "nothing leaves while off");
+        assert_eq!(f.state.feedback.queue.len().await.unwrap(), 1);
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": true}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        eventually("it was delivered", || !intake.requests().is_empty()).await;
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_intake_status_is_retried_not_dropped() {
+        let dir = tempdir::TempDir::new("storm-feedback-404-retry").unwrap();
+        let intake = fake_intake().await;
+        intake.answer(
+            StatusCode::NOT_FOUND,
+            None,
+            serde_json::json!({"error": "not found"}),
+        );
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+        assert!(intake.requests().len() >= 2, "retried past the 404");
+    }
+
+    #[tokio::test]
+    async fn an_expired_or_unknown_preview_is_410() {
+        let dir = tempdir::TempDir::new("storm-feedback-expired").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (status, body) = submit(
+            &f,
+            serde_json::json!({"preview_id": "prv_nope", "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::GONE,
+                serde_json::json!({"error": "preview_expired"})
+            )
+        );
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        tokio::time::sleep(crate::feedback::preview::TTL + std::time::Duration::from_millis(100))
+            .await;
+        let (status, body) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::GONE,
+                serde_json::json!({"error": "preview_expired"})
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn feedback_send_validates_text_email_kind_and_screenshot_size() {
+        let dir = tempdir::TempDir::new("storm-feedback-validate").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let pid = prev["preview_id"].clone();
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({"preview_id": pid, "kind": "bug", "text": ""}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "empty text");
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({"preview_id": pid, "kind": "bug", "text": "x".repeat(20_001)}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "text too long");
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": pid, "kind": "bug", "text": "ok",
+                "email": "a".repeat(255),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "email too long");
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({"preview_id": pid, "kind": "idea", "text": "ok"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "kind does not match the preview"
+        );
+
+        let too_big = data_encoding::BASE64.encode(&vec![0u8; 4 * 1024 * 1024 + 1]);
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": pid, "kind": "bug", "text": "ok",
+                "screenshot_png_b64": too_big,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "screenshot over 4 MiB decoded"
+        );
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": pid, "kind": "bug", "text": "ok",
+                "screenshot_png_b64": "not-base64!!",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "not valid base64");
+
+        // Fresh preview: the checks above can outlast the test TTL.
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let ok_shot = data_encoding::BASE64.encode(&vec![0u8; 1024]);
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": prev["preview_id"], "kind": "bug", "text": "ok",
+                "screenshot_png_b64": ok_shot,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn client_strings_are_redacted_before_storage() {
+        let dir = tempdir::TempDir::new("storm-feedback-redact").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        {
+            let mut vaults = f.state.vaults.write().await;
+            vaults
+                .registry
+                .create("Secret Vault", &crate::index::now_rfc3339())
+                .unwrap();
+        }
+        let mut client = client_info("viewing Secret Vault");
+        client["actions"] = serde_json::json!(["opened Secret Vault"]);
+        client["error"] = serde_json::json!({
+            "action": "save", "message": "Authorization: Bearer stk_SUPERSECRETVALUE0123456789",
+        });
+
+        let (status, prev) = preview(&f, "bug", false, client).await;
+        assert_eq!(status, StatusCode::OK, "{prev}");
+        let joined = prev["client"].to_string();
+        assert!(!joined.contains("Secret Vault"), "{joined}");
+        assert!(!joined.contains("SUPERSECRETVALUE0123456789"), "{joined}");
+        assert!(joined.contains("<vault>"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn host_diag_logs_in_the_bundle_are_also_redacted() {
+        let dir = tempdir::TempDir::new("storm-feedback-host-redact").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        {
+            let mut vaults = f.state.vaults.write().await;
+            vaults
+                .registry
+                .create("Secret Vault", &crate::index::now_rfc3339())
+                .unwrap();
+        }
+        let (host, token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (_, mut link) = f.state.agent.connect_host(&host);
+        let mut caps = install_caps(false);
+        caps["diag"] = serde_json::json!(true);
+        f.state
+            .agent
+            .hello(&host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+
+        let host_bearer = format!("Bearer {token}");
+        let gather = preview(&f, "bug", true, client_info("x"));
+        let answer = async {
+            let sent = serde_json::to_value(link.recv().await.unwrap()).unwrap();
+            let request_id = sent["request_id"].as_str().unwrap().to_string();
+            let diag = serde_json::json!({
+                "schema": 1, "component": "storm-runtime", "version": "0.19.0",
+                "os": "linux", "arch": "x86_64",
+                "logs": ["opened Secret Vault for editing"],
+            });
+            send(
+                &f.app,
+                post_json_with_auth(
+                    "/v1/runtime/diag",
+                    serde_json::json!({"request_id": request_id, "diag": diag}),
+                    &host_bearer,
+                ),
+            )
+            .await
+        };
+        let ((status, prev), _) = tokio::join!(gather, answer);
+        assert_eq!(status, StatusCode::OK, "{prev}");
+        let joined = prev["bundle"].to_string();
+        assert!(!joined.contains("Secret Vault"), "{joined}");
+        assert!(joined.contains("<vault>"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn retry_after_is_honoured_over_the_default_backoff() {
+        let dir = tempdir::TempDir::new("storm-feedback-retry-after").unwrap();
+        let intake = fake_intake().await;
+        intake.answer(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(100),
+            serde_json::json!({"error": "rate limited"}),
+        );
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+
+        eventually("the first attempt landed", || !intake.requests().is_empty()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert_eq!(
+            intake.requests().len(),
+            1,
+            "a 100 s Retry-After must not be re-tried after milliseconds"
+        );
     }
 
     fn child_listing(mode: &str) -> serde_json::Value {
