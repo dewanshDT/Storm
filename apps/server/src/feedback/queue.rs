@@ -1,11 +1,4 @@
-//! The durable send queue (decision 162b/162-3): a report is in this table
-//! before `POST /v1/feedback` answers `202`, and stays until the forwarder
-//! delivers it, drops it permanently, or gives up after 7 days.
-//!
-//! **`body` is the exact bytes forwarded to the intake Worker.** Never
-//! logged — a row holds a user's report text, their email and the
-//! diagnostics bundle, and decision 162c's whole point is that none of that
-//! leaves this server except to the intake it was sent to.
+// `body` is the exact bytes forwarded to the intake; never logged.
 
 use std::path::Path;
 
@@ -49,8 +42,6 @@ impl Queue {
         })
     }
 
-    /// Persists a send before its `202` — the durability guarantee a client
-    /// reconnecting later relies on.
     pub async fn enqueue(&self, report_id: &str, body: &str, now: &str) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute(
@@ -61,7 +52,6 @@ impl Queue {
         Ok(())
     }
 
-    /// Rows ready to try now, oldest first, at most `limit`.
     pub async fn due(&self, now: &str, limit: usize) -> Result<Vec<QueueRow>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
@@ -80,8 +70,6 @@ impl Queue {
             .context("reading due feedback sends")
     }
 
-    /// A send failed and will be tried again: one more attempt, at
-    /// `next_attempt`, with `reason` for the operator (never the body).
     pub async fn reschedule(
         &self,
         report_id: &str,
@@ -98,7 +86,6 @@ impl Queue {
         Ok(())
     }
 
-    /// Delivered, dropped permanently, or given up on — removed either way.
     pub async fn remove(&self, report_id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute(
@@ -115,8 +102,6 @@ impl Queue {
             .context("counting the feedback queue")
     }
 
-    /// Backdates a row's `created_at`, for the "gives up after 7 days" test
-    /// — real time never has to pass for it.
     #[cfg(test)]
     pub async fn backdate_for_tests(&self, report_id: &str, created_at: &str) -> Result<()> {
         let conn = self.conn.lock().await;

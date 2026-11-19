@@ -1,26 +1,14 @@
-//! The in-memory preview store (decision 162b): what `POST
-//! /v1/feedback/preview` built, kept exactly as built so `POST
-//! /v1/feedback` forwards the same bytes it showed (AC-162-3). Memory only
-//! — a restart loses an unconfirmed preview, which is the right failure
-//! mode for something the client is expected to re-request in seconds.
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// How long a preview answers `POST /v1/feedback` (decision 162b). Scaled
-/// down under test so a "does it expire" test costs seconds, not minutes —
-/// but not so far down that a slow CI runner (several sequential round
-/// trips, one of them encoding a multi-megabyte screenshot) expires one
-/// mid-test.
+// Scaled down under test, but not so far that a slow CI runner expires one
+// mid-test.
 pub const TTL: Duration = if cfg!(test) {
     Duration::from_secs(2)
 } else {
     Duration::from_secs(10 * 60)
 };
 
-/// A cap on concurrently held previews, so an account that never confirms
-/// cannot grow this past a bound. Comfortably above what a real client
-/// ever holds at once; past it the oldest are evicted to make room.
 const MAX_PREVIEWS: usize = 500;
 
 #[derive(Debug, Clone)]
@@ -47,8 +35,6 @@ pub struct PreviewStore {
 }
 
 impl PreviewStore {
-    /// Stores a freshly built preview, pruning expired ones first and, if
-    /// still over the cap, the oldest live ones next.
     pub fn insert(
         &mut self,
         preview_id: String,
@@ -78,9 +64,6 @@ impl PreviewStore {
         expires_at
     }
 
-    /// `None` for both an unknown id and an expired one — the caller
-    /// answers `410 preview_expired` either way, never telling the two
-    /// apart.
     pub fn get(&self, preview_id: &str) -> Option<Preview> {
         let preview = self.previews.get(preview_id)?;
         if preview.is_expired(Instant::now()) {
@@ -137,7 +120,6 @@ mod tests {
                 serde_json::json!({}),
                 serde_json::json!({}),
             );
-            // Distinct `created_at` for a deterministic "oldest".
             std::thread::sleep(Duration::from_micros(1));
         }
         assert!(store.get("prv_0").is_some());

@@ -24,7 +24,6 @@ use std::sync::{Arc, RwLock};
 
 pub const REGISTRY_FILE: &str = "vaults.json";
 
-/// Decision 162: the coordinator sets the real one at deploy (162-7).
 pub const DEFAULT_FEEDBACK_INTAKE_URL: &str = "https://feedback.storm.dev";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,22 +211,15 @@ pub struct Registry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     discoverable: Option<bool>,
 
-    /// Decision 162: a random id for this server, minted once and never
-    /// derived from anything else, so the feedback intake can rate-limit
-    /// and deduplicate by install without it being a device id. `load`
-    /// mints one the first time it finds none.
+    // Random, never a device id; minted once by `load` if absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     install_id: Option<String>,
 
-    /// Decision 162k: the off switch for in-app feedback. Absent means on,
-    /// which is the safe default for a feature users must be able to find
-    /// and use without a setup step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feedback_enabled: Option<bool>,
 
-    /// Decision 162: where reports are forwarded. Absent means
-    /// [`DEFAULT_FEEDBACK_INTAKE_URL`]; an explicit empty string means "not
-    /// configured" — the feedback API contract's `intake_configured`.
+    // Absent means the default URL; an explicit empty string means "not
+    // configured".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feedback_intake_url: Option<String>,
 
@@ -341,9 +333,6 @@ impl Registry {
         registry
             .agent_writes
             .get_or_insert(registry.mcp_enabled && registry.mcp_writable);
-        // Decision 162: an older registry has none; mint one once, here,
-        // so every caller of `load` — not just `serve` — gets a consistent
-        // id rather than a fresh one per call.
         registry
             .install_id
             .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
@@ -379,8 +368,6 @@ impl Registry {
         self.discoverable = Some(on);
     }
 
-    /// Decision 162: random, minted once by [`Registry::load`]. Never a
-    /// device id.
     pub fn install_id(&self) -> &str {
         self.install_id.as_deref().unwrap_or_default()
     }
@@ -399,8 +386,6 @@ impl Registry {
             .unwrap_or(DEFAULT_FEEDBACK_INTAKE_URL)
     }
 
-    /// `false` only when the url is explicitly set to an empty string (the
-    /// feedback API contract's `intake_configured`).
     pub fn feedback_intake_configured(&self) -> bool {
         self.feedback_intake_url.as_deref() != Some("")
     }

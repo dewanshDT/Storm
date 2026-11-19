@@ -2766,10 +2766,6 @@ pub struct HostDiagEntry {
     pub status: &'static str,
 }
 
-/// Every host this account has enrolled and not revoked — the population a
-/// diagnostics bundle counts and gathers from. Order is whatever
-/// `list_hosts` returns, which is what makes the gather's positional labels
-/// stable from one call to the next.
 async fn live_hosts(state: &Shared) -> Vec<crate::auth::hosts::Host> {
     let auth_db = state.auth_db.lock().await;
     auth_db
@@ -2780,9 +2776,6 @@ async fn live_hosts(state: &Shared) -> Vec<crate::auth::hosts::Host> {
         .collect()
 }
 
-/// Every vault's current display name, as a redaction's `Sensitive` list
-/// (decision 162c). Live, not the name a log line was written under — a
-/// vault renamed since must not leave its old name recoverable.
 async fn live_vault_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
     state
         .vaults
@@ -2873,20 +2866,10 @@ pub async fn server_diag(state: &Shared) -> storm_diag::Diag {
         .with_logs(logs)
 }
 
-// ---- Decision 162-3: in-app feedback — preview, send and settings ---------
-//
-// Session tier (the feedback API contract). `preview` builds exactly the
-// bytes `send` later forwards (AC-162-3): the redacted `client` and the
-// diagnostics `bundle` are built once, kept in the preview store, and
-// replayed unchanged — `send` adds only what it alone carries: `text`,
-// `email` and the screenshot.
-
 pub const MAX_FEEDBACK_TEXT_CHARS: usize = 20_000;
 pub const MAX_FEEDBACK_EMAIL_CHARS: usize = 254;
-/// Decision 162c: the screenshot, decoded.
 pub const MAX_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
-/// `apps/feedback-cf`'s own limit (decision 162d): the whole forwarded
-/// body, screenshot included, must stay under it.
+// The Worker's own limit on the whole forwarded body, screenshot included.
 pub const MAX_FORWARD_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ACTIONS: usize = 20;
 const MAX_CONNECTION_LOG_LINES: usize = 200;
@@ -2922,7 +2905,6 @@ pub struct FeedbackStatus {
     pub intake_configured: bool,
 }
 
-/// `GET /v1/feedback` — whether the sheet can send at all.
 pub async fn feedback_status(state: &Shared) -> FeedbackStatus {
     let vaults = state.vaults.read().await;
     FeedbackStatus {
@@ -2931,14 +2913,10 @@ pub async fn feedback_status(state: &Shared) -> FeedbackStatus {
     }
 }
 
-/// Decision 162k: the off switch, and where reports go. Owner-facing
-/// settings, same shape as `PUT /v1/config/discovery`.
 #[derive(Debug, Deserialize)]
 pub struct SetFeedbackSettings {
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// Absent leaves it unchanged; an empty string turns off
-    /// `intake_configured` without turning `enabled` off.
     #[serde(default)]
     pub intake_url: Option<String>,
 }
@@ -2961,9 +2939,6 @@ pub async fn set_feedback_settings(
     })
 }
 
-/// Every string in a JSON value, recursively — decision 162c's redaction
-/// applies to `client` wherever a string sits in it, not to a fixed list
-/// of fields, so a client that adds one is covered without a server change.
 fn redact_json(
     value: &serde_json::Value,
     sensitive: &[storm_diag::Sensitive],
@@ -2982,9 +2957,6 @@ fn redact_json(
     }
 }
 
-/// Keeps only the newest `actions` and `connection_log` entries (the
-/// contract's ≤20 and ≤200) — a client that sent more is bounded rather
-/// than refused, since both arrays are explicitly "newest last".
 fn bound_client(mut client: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = client.as_object_mut() {
         for (key, max) in [
@@ -3019,7 +2991,6 @@ pub struct FeedbackPreviewResponse {
     pub bytes: u64,
 }
 
-/// `POST /v1/feedback/preview`.
 pub async fn feedback_preview(
     state: &Shared,
     req: FeedbackPreviewRequest,
@@ -3035,9 +3006,7 @@ pub async fn feedback_preview(
     let bundle = if req.include_diagnostics {
         let server = server_diag(state).await;
         let mut hosts = gather_host_diags(state, HOST_DIAG_TIMEOUT).await;
-        // A host's ring has no concept of a vault name — only the server
-        // knows the live list — so its lines are re-redacted with it here,
-        // the same way the server's own bundle re-redacts its own.
+        // A host's ring doesn't know vault names, so re-redact here too.
         for host in &mut hosts {
             if let Some(diag) = host.diag.as_mut() {
                 diag.logs = diag
@@ -3095,9 +3064,6 @@ pub struct FeedbackSendResponse {
     pub queued: bool,
 }
 
-/// `POST /v1/feedback`: validates, builds the forward body from the named
-/// preview, persists it in the durable queue — **before** this answers —
-/// and wakes the forwarder.
 pub async fn feedback_send(
     state: &Shared,
     req: FeedbackSendRequest,

@@ -465,11 +465,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config/relays", put(put_relays))
         .route("/v1/config/discovery", put(put_discovery))
         .route("/v1/config/feedback", put(put_feedback_settings))
-        // In-app feedback (decision 162-3): preview builds the bundle `send`
-        // later forwards unchanged (AC-162-3). The base64 screenshot alone
-        // can be ~5.4 MiB (4 MiB decoded); 8 MiB leaves room for the rest of
-        // the body and is still well under the Worker's own 5 MB *decoded*
-        // cap, enforced in `ops::feedback_send`.
+        // 8 MiB: a base64 4 MiB screenshot alone is ~5.4 MiB.
         .route(
             "/v1/feedback",
             get(get_feedback)
@@ -3676,7 +3672,6 @@ async fn put_discovery(
         .map(Json)
 }
 
-/// PUT /v1/config/feedback — decision 162k's off switch and intake URL.
 async fn put_feedback_settings(
     State(state): State<Shared>,
     Json(body): Json<crate::ops::SetFeedbackSettings>,
@@ -3686,13 +3681,10 @@ async fn put_feedback_settings(
         .map(Json)
 }
 
-/// GET /v1/feedback — the feedback API contract: whether the sheet can
-/// send at all.
 async fn get_feedback(State(state): State<Shared>) -> Json<crate::ops::FeedbackStatus> {
     Json(crate::ops::feedback_status(&state).await)
 }
 
-/// POST /v1/feedback/preview.
 async fn post_feedback_preview(
     State(state): State<Shared>,
     Json(body): Json<crate::ops::FeedbackPreviewRequest>,
@@ -3700,7 +3692,6 @@ async fn post_feedback_preview(
     crate::ops::feedback_preview(&state, body).await.map(Json)
 }
 
-/// POST /v1/feedback.
 async fn post_feedback(
     State(state): State<Shared>,
     Json(body): Json<crate::ops::FeedbackSendRequest>,
@@ -14854,10 +14845,6 @@ pub(crate) mod tests {
         std::sync::Mutex<std::collections::VecDeque<(StatusCode, Option<u64>, serde_json::Value)>>,
     >;
 
-    /// A stand-in `apps/feedback-cf` Worker: records every body it is sent,
-    /// and answers from a scripted queue (status, an optional `Retry-After`
-    /// in seconds, and a JSON body), falling back to a plain `201` once the
-    /// script runs out.
     struct FakeIntake {
         url: String,
         requests: FakeRequests,
@@ -14921,12 +14908,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Polls `cond` until it is true or patience runs out — the forwarder's
-    /// own poll interval is milliseconds under test, so a real delivery or
-    /// retry shows up quickly on a normal box. The window is generous
-    /// (30 s) because a CI Windows runner is dramatically slower than a
-    /// dev box at exactly this (many small processes and TCP round trips),
-    /// not because any one case is expected to take anywhere near that long.
+    // 30 s of patience: a CI Windows runner is far slower than a dev box
+    // at many small processes and TCP round trips.
     async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..3000 {
             if cond() {
@@ -14937,8 +14920,6 @@ pub(crate) mod tests {
         panic!("timed out waiting for: {what}");
     }
 
-    /// As [`eventually`], but for a condition that itself has to `.await`
-    /// (the queue's own length) rather than one that can be polled plainly.
     async fn eventually_queue_len(queue: &crate::feedback::queue::Queue, want: i64) {
         for _ in 0..3000 {
             if queue.len().await.unwrap_or(-1) == want {
@@ -14956,9 +14937,6 @@ pub(crate) mod tests {
     }
 
     impl FeedbackFixture {
-        /// Starts the forwarder against this fixture's own state — never
-        /// auto-started by the test router, the same way no other
-        /// background task is.
         fn spawn_forwarder(&self) {
             tokio::spawn(crate::feedback::forwarder::run(self.state.clone()));
         }
@@ -15023,8 +15001,6 @@ pub(crate) mod tests {
         .await
     }
 
-    /// AC-162-3: a send forwards exactly the `client` and `bundle` its
-    /// preview showed.
     #[tokio::test]
     async fn preview_equals_the_forwarded_bytes() {
         let dir = tempdir::TempDir::new("storm-feedback-preview-eq").unwrap();
@@ -15062,12 +15038,9 @@ pub(crate) mod tests {
         assert!(!forwarded["install_id"].as_str().unwrap().is_empty());
     }
 
-    /// AC-162-4: a send that cannot reach the intake is retried, and is
-    /// delivered once the intake is reachable — nothing is lost in between.
     #[tokio::test]
     async fn offline_sends_are_retried_then_delivered() {
         let dir = tempdir::TempDir::new("storm-feedback-offline").unwrap();
-        // A port nothing listens on: every attempt is a network failure.
         let dead = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             format!("http://{}", l.local_addr().unwrap())
@@ -15084,7 +15057,6 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
         assert_eq!(f.state.feedback.queue.len().await.unwrap(), 1);
 
-        // Give it a few failed rounds, then point it at a real intake.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert_eq!(
             f.state.feedback.queue.len().await.unwrap(),
@@ -15124,8 +15096,6 @@ pub(crate) mod tests {
         eventually_queue_len(&f.state.feedback.queue, 0).await;
     }
 
-    /// AC-162-5: disabled means nothing reaches the intake — preview and
-    /// send both refuse, even for a preview made before it was turned off.
     #[tokio::test]
     async fn disabled_feedback_sends_nothing() {
         let dir = tempdir::TempDir::new("storm-feedback-disabled").unwrap();
@@ -15177,8 +15147,74 @@ pub(crate) mod tests {
         assert_eq!(body["enabled"], false);
     }
 
-    /// A preview past its 10-minute window (scaled under test) is `410
-    /// preview_expired`, the same answer an unknown id gets.
+    #[tokio::test]
+    async fn disabling_feedback_holds_a_queued_send_until_re_enabled() {
+        let dir = tempdir::TempDir::new("storm-feedback-off-queue").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        f.spawn_forwarder();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(intake.requests().is_empty(), "nothing leaves while off");
+        assert_eq!(f.state.feedback.queue.len().await.unwrap(), 1);
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": true}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        eventually("it was delivered", || !intake.requests().is_empty()).await;
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_intake_status_is_retried_not_dropped() {
+        let dir = tempdir::TempDir::new("storm-feedback-404-retry").unwrap();
+        let intake = fake_intake().await;
+        intake.answer(
+            StatusCode::NOT_FOUND,
+            None,
+            serde_json::json!({"error": "not found"}),
+        );
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+        assert!(intake.requests().len() >= 2, "retried past the 404");
+    }
+
     #[tokio::test]
     async fn an_expired_or_unknown_preview_is_410() {
         let dir = tempdir::TempDir::new("storm-feedback-expired").unwrap();
@@ -15215,8 +15251,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Validation: text length, email length, a kind that does not match
-    /// the preview's own, and a screenshot over the 4 MiB decoded cap.
     #[tokio::test]
     async fn feedback_send_validates_text_email_kind_and_screenshot_size() {
         let dir = tempdir::TempDir::new("storm-feedback-validate").unwrap();
@@ -15286,8 +15320,7 @@ pub(crate) mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "not valid base64");
 
-        // A fresh preview: the checks above, the 4 MiB encode included,
-        // can outlast the test-scaled TTL on a loaded box.
+        // Fresh preview: the checks above can outlast the test TTL.
         let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
         let ok_shot = data_encoding::BASE64.encode(&vec![0u8; 1024]);
         let (status, sent) = submit(
@@ -15301,8 +15334,6 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
     }
 
-    /// Decision 162c: every string in `client` is redacted, including a
-    /// vault name, before it is ever stored or forwarded.
     #[tokio::test]
     async fn client_strings_are_redacted_before_storage() {
         let dir = tempdir::TempDir::new("storm-feedback-redact").unwrap();
@@ -15329,9 +15360,6 @@ pub(crate) mod tests {
         assert!(joined.contains("<vault>"), "{joined}");
     }
 
-    /// A host's diagnostics in the bundle are re-redacted with the live
-    /// vault-name list too — a host's own ring has no idea what a vault is
-    /// called.
     #[tokio::test]
     async fn host_diag_logs_in_the_bundle_are_also_redacted() {
         let dir = tempdir::TempDir::new("storm-feedback-host-redact").unwrap();
@@ -15380,9 +15408,6 @@ pub(crate) mod tests {
         assert!(joined.contains("<vault>"), "{joined}");
     }
 
-    /// `Retry-After` on a 429 is honoured over the default backoff: a
-    /// much larger value means no second attempt arrives within the
-    /// window the default backoff would have retried in.
     #[tokio::test]
     async fn retry_after_is_honoured_over_the_default_backoff() {
         let dir = tempdir::TempDir::new("storm-feedback-retry-after").unwrap();
@@ -15403,7 +15428,6 @@ pub(crate) mod tests {
         .await;
 
         eventually("the first attempt landed", || !intake.requests().is_empty()).await;
-        // Several default-backoff windows pass with no second attempt.
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         assert_eq!(
             intake.requests().len(),

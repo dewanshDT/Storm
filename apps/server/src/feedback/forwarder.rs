@@ -1,54 +1,34 @@
-//! The background forwarder (decision 162b): delivers durably queued sends
-//! to the intake Worker. Backoff from 1 s to a 1 h cap, `Retry-After`
-//! honoured when the Worker sends one, a permanent drop on 400/413, and a
-//! send older than 7 days is given up on — every one of those removes the
-//! row, so nothing durable outlives its own outcome.
-//!
-//! **Never logs a row's body.** `report_id`, an HTTP status or a fixed
-//! reason word are the only things a log line here ever carries.
-
 use std::time::Duration;
 
 use time::format_description::well_known::Rfc3339;
 
 use crate::api::Shared;
 
-/// Exponential backoff base (the feedback API contract's "1 s"). Scaled
-/// down under test so a retry sequence costs milliseconds, not minutes.
+// Scaled down under test so a retry sequence costs milliseconds, not
+// minutes or days.
 const BASE_BACKOFF: Duration = if cfg!(test) {
     Duration::from_millis(15)
 } else {
     Duration::from_secs(1)
 };
-/// The contract's "1 h" cap, scaled the same way.
 const MAX_BACKOFF: Duration = if cfg!(test) {
     Duration::from_millis(200)
 } else {
     Duration::from_secs(60 * 60)
 };
-/// The contract's "give up after 7 days", scaled the same way — a test
-/// backdates a row's `created_at` rather than waiting for real time to pass.
 const GIVE_UP_AFTER: Duration = if cfg!(test) {
     Duration::from_millis(500)
 } else {
     Duration::from_secs(7 * 24 * 60 * 60)
 };
-/// How often the forwarder looks for sends that are due, between wakes.
 const POLL_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(10)
 } else {
     Duration::from_secs(5)
 };
-/// At most this many sends attempted per pass, so one huge backlog cannot
-/// starve the loop from ever sleeping and checking for new work.
 const BATCH: usize = 25;
-/// How long one attempt may take before it counts as unreachable.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The forwarder's own HTTP client: rustls on `ring` with the bundled
-/// roots, like the gateway's upstream client, and no redirect — the intake
-/// URL is configuration, not somewhere a 3xx should be able to redirect a
-/// report full of diagnostics to.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(crate::gateway::upstream::tls_config())
@@ -63,7 +43,8 @@ enum Outcome {
     Delivered,
     Retry {
         after: Option<Duration>,
-        reason: &'static str,
+        reason: String,
+        unexpected: bool,
     },
     Drop {
         reason: &'static str,
@@ -83,12 +64,12 @@ async fn attempt(client: &reqwest::Client, intake_url: &str, body: &str) -> Outc
         Err(_) => {
             return Outcome::Retry {
                 after: None,
-                reason: "network",
+                reason: "network".into(),
+                unexpected: false,
             };
         }
     };
     let status = response.status();
-    // 200 and 201 both mean delivered (the feedback API contract).
     if status.is_success() {
         return Outcome::Delivered;
     }
@@ -103,21 +84,23 @@ async fn attempt(client: &reqwest::Client, intake_url: &str, body: &str) -> Outc
         413 => Outcome::Drop { reason: "413" },
         429 => Outcome::Retry {
             after: retry_after,
-            reason: "429",
+            reason: "429".into(),
+            unexpected: false,
         },
         503 => Outcome::Retry {
             after: retry_after,
-            reason: "503",
+            reason: "503".into(),
+            unexpected: false,
         },
         s if (500..600).contains(&s) => Outcome::Retry {
             after: retry_after,
-            reason: "5xx",
+            reason: "5xx".into(),
+            unexpected: false,
         },
-        // Anything else is a response the Worker's own contract does not
-        // describe — never looped on forever, since nothing here says it
-        // will ever change.
-        _ => Outcome::Drop {
-            reason: "unexpected_status",
+        s => Outcome::Retry {
+            after: retry_after,
+            reason: s.to_string(),
+            unexpected: true,
         },
     }
 }
@@ -139,9 +122,6 @@ fn add(stamp: &str, extra: Duration) -> String {
     }
 }
 
-/// How long ago `created_at` was, relative to `now` — both stamps this
-/// server wrote itself, so an unparseable one is not expected to happen;
-/// treated as "just now" rather than panicking either way.
 fn age(created_at: &str, now: &str) -> Duration {
     match (
         time::OffsetDateTime::parse(created_at, &Rfc3339),
@@ -155,10 +135,6 @@ fn age(created_at: &str, now: &str) -> Duration {
     }
 }
 
-/// Runs until the process exits. One loop: wait for a wake or the poll
-/// interval, fetch what is due, attempt each, reschedule or remove.
-/// Resuming pending rows after a restart is nothing special — they are
-/// just rows whose `next_attempt` is already in the past.
 pub async fn run(state: Shared) {
     let client = http_client();
     loop {
@@ -177,14 +153,22 @@ pub async fn run(state: Shared) {
         if due.is_empty() {
             continue;
         }
-        let intake_url = {
+        let (intake_url, enabled) = {
             let vaults = state.vaults.read().await;
-            vaults.registry.feedback_intake_url().to_string()
+            (
+                vaults.registry.feedback_intake_url().to_string(),
+                vaults.registry.feedback_enabled(),
+            )
         };
         for row in due {
             if age(&row.created_at, &now) >= GIVE_UP_AFTER {
                 tracing::warn!(report_id = %row.report_id, attempts = row.attempts, "feedback: giving up after 7 days");
                 let _ = state.feedback.queue.remove(&row.report_id).await;
+                continue;
+            }
+            // Off means nothing leaves; the row stays queued and ages
+            // toward the 7-day cap regardless.
+            if !enabled {
                 continue;
             }
             match attempt(&client, &intake_url, &row.body).await {
@@ -196,15 +180,23 @@ pub async fn run(state: Shared) {
                     tracing::warn!(report_id = %row.report_id, reason, "feedback: dropped permanently");
                     let _ = state.feedback.queue.remove(&row.report_id).await;
                 }
-                Outcome::Retry { after, reason } => {
+                Outcome::Retry {
+                    after,
+                    reason,
+                    unexpected,
+                } => {
                     let attempts = row.attempts + 1;
                     let backoff = after.unwrap_or_else(|| exponential_backoff(attempts));
                     let next_attempt = add(&now, backoff);
-                    tracing::info!(report_id = %row.report_id, attempts, reason, "feedback: retrying later");
+                    if unexpected {
+                        tracing::warn!(report_id = %row.report_id, attempts, status = %reason, "feedback: intake answered an unexpected status; holding for retry");
+                    } else {
+                        tracing::info!(report_id = %row.report_id, attempts, reason = %reason, "feedback: retrying later");
+                    }
                     let _ = state
                         .feedback
                         .queue
-                        .reschedule(&row.report_id, attempts, &next_attempt, reason)
+                        .reschedule(&row.report_id, attempts, &next_attempt, &reason)
                         .await;
                 }
             }
