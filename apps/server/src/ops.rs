@@ -5086,6 +5086,11 @@ pub struct SessionView {
     /// OSC 10/11 colour query with (157g); absent until its host says.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_answered: Option<crate::agent::TerminalBrightness>,
+    /// Whether its program has DEC 2031 (colour-scheme reports) on, as its
+    /// host last said (decision 157's theme catch-up fix); absent until its
+    /// host says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_scheme_report: Option<bool>,
     /// Its host's last request, while the host is offline and the session
     /// has not ended (153a); `null` otherwise.
     pub host_last_seen: Option<String>,
@@ -5224,6 +5229,7 @@ fn session_view(
     let attention = state.agent.attention(&session).map_err(agent_error)?;
     let program_status = state.agent.program_status(&session);
     let terminal_answered = state.agent.terminal_answered(&session.id);
+    let terminal_scheme_report = state.agent.terminal_scheme_report(&session.id);
     let pending_decisions = delete_request
         .iter()
         .map(|d| PendingDecision {
@@ -5267,6 +5273,7 @@ fn session_view(
         attention,
         program_status,
         terminal_answered,
+        terminal_scheme_report,
         host_last_seen: None,
         pending_decisions,
         output_end,
@@ -5655,6 +5662,7 @@ pub async fn launch_session(
         attention: None,
         program_status: None,
         terminal_answered: None,
+        terminal_scheme_report: None,
         host_last_seen: None,
         pending_decisions: Vec::new(),
         output_end: None,

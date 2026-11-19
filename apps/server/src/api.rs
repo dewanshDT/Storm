@@ -2747,6 +2747,9 @@ async fn agent_terminal_stream(
                 if let Some(answered) = st.agent.terminal_answered(&st.id) {
                     status["terminal_answered"] = serde_json::json!(answered);
                 }
+                if let Some(scheme_report) = st.agent.terminal_scheme_report(&st.id) {
+                    status["terminal_scheme_report"] = serde_json::json!(scheme_report);
+                }
                 let json = status.to_string();
                 if st.last_status.as_ref() != Some(&json) {
                     st.last_status = Some(json.clone());
@@ -22370,6 +22373,29 @@ pub(crate) mod tests {
         let status = stream.expect("status").await;
         let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
         assert_eq!(record["terminal_answered"], "light");
+    }
+
+    /// Decision 157's theme catch-up fix: the stream's status carries
+    /// whether the host last said DEC 2031 was on, before a fresh client's
+    /// own emulator could have parsed it.
+    #[tokio::test]
+    async fn the_streams_status_carries_the_scheme_report_mode() {
+        let dir = tempdir::TempDir::new("storm-157-catchup-stream").unwrap();
+        let f = terminal_fixture(dir.path(), b"hello").await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert!(record.get("terminal_scheme_report").is_none(), "{record}");
+
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "running", "terminal_scheme_report": true}),
+        );
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["terminal_scheme_report"], true);
     }
 
     #[tokio::test]

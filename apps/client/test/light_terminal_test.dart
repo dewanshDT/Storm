@@ -235,4 +235,98 @@ void main() {
       expect(view(tester).theme.background, lightTerminalBackground(lightT));
     });
   });
+
+  group('the theme catch-up fix', () {
+    // 997;1 is dark, 997;2 is light (as the live-switch tests above use).
+    const toDark = '\x1b[?997;1n';
+    const toLight = '\x1b[?997;2n';
+
+    testWidgets('a mismatched remembered answer with 2031 on is caught up '
+        'once on the first build', (tester) async {
+      final h = harness(tester);
+      h.t.remembered('dark');
+      h.t.rememberedSchemeReport(true);
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, [toLight]);
+
+      h.sent.clear();
+      await h.pump(StormTheme.light());
+      await h.pump(StormTheme.light());
+      expect(h.sent, isEmpty, reason: 'checked once per mount, not rebuild');
+    });
+
+    testWidgets('with 2031 off, a mismatched remembered answer is never '
+        'caught up', (tester) async {
+      final h = harness(tester);
+      h.t.remembered('dark');
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, isEmpty);
+    });
+
+    testWidgets('with no mismatch, nothing is sent', (tester) async {
+      final h = harness(tester);
+      h.t.remembered('light');
+      h.t.rememberedSchemeReport(true);
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, isEmpty);
+    });
+
+    testWidgets('a shell view never asks for a catch-up', (tester) async {
+      final h = harness(tester, shell: true);
+      h.t.remembered('dark');
+      h.t.rememberedSchemeReport(true);
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, isEmpty);
+    });
+
+    testWidgets('Always dark already dark needs no catch-up', (tester) async {
+      const prefs = TerminalPrefs(colours: TerminalColours.alwaysDark);
+      final h = harness(tester, prefs: prefs);
+      h.t.remembered('dark');
+      h.t.rememberedSchemeReport(true);
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, isEmpty);
+    });
+
+    testWidgets('Always dark still catches up a stale light answer', (
+      tester,
+    ) async {
+      const prefs = TerminalPrefs(colours: TerminalColours.alwaysDark);
+      final h = harness(tester, prefs: prefs);
+      h.t.remembered('light');
+      h.t.rememberedSchemeReport(true);
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, [toDark]);
+    });
+
+    testWidgets("this terminal's own parsed mode wins over a stale "
+        'remembered false', (tester) async {
+      final h = harness(tester);
+      h.t.remembered('dark');
+      h.t.rememberedSchemeReport(false);
+      write(h.t, '\x1b[?2031h');
+      await h.pump(StormTheme.light());
+      await tester.pumpAndSettle();
+      expect(h.sent, [toLight]);
+    });
+
+    testWidgets('a live switch in the same build is not sent twice', (
+      tester,
+    ) async {
+      final h = harness(tester);
+      await h.pump(StormTheme.dark());
+      write(h.t, '\x1b]11;?\x1b\\\x1b[?2031h');
+      h.t.remembered('dark');
+      h.sent.clear();
+
+      await h.pump(StormTheme.light());
+      expect(h.sent, [toLight], reason: 'the live switch alone, not twice');
+    });
+  });
 }

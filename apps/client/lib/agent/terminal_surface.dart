@@ -89,6 +89,7 @@ class StormTerminal {
   bool _answeredHere = false;
   Brightness? _remembered;
   bool _colourPending = false;
+  bool _schemeReportPending = false;
 
   /// What the session's host says its program was last answered with
   /// (157g), from whichever device answered: shown until this terminal
@@ -108,24 +109,83 @@ class StormTerminal {
   /// The reply [onReply] is being handed went out to the program.
   void replySent() {
     if (_colourPending) _answeredHere = true;
+    if (_schemeReportPending) _catchUpSentFor = _target;
   }
 
   /// What an answer gives now: the view's target, set as it builds.
   Brightness _target = Brightness.dark;
 
+  /// What the session's host last said the program's DEC 2031 (colour-
+  /// scheme report) mode was (the theme catch-up fix), from whichever
+  /// device last reported a session status: a fallback for when this
+  /// terminal's own emulator has not itself parsed the mode (its replay
+  /// started after the program set it). This terminal's own parse, once it
+  /// has one, is never stale, so it alone decides when it disagrees.
+  bool? _rememberedSchemeReport;
+
+  void rememberedSchemeReport(bool? enabled) {
+    if (enabled != null) _rememberedSchemeReport = enabled;
+  }
+
+  bool get _schemeReportEnabled =>
+      _terminal.reportColorSchemeMode || (_rememberedSchemeReport ?? false);
+
+  /// The mismatch [catchUpTheme] last sent a report for, so it is not
+  /// resent every time this is called before the program answers again.
+  Brightness? _catchUpSentFor;
+
+  /// The theme catch-up fix: when the program has DEC 2031 on and a known
+  /// answer (this terminal's own, or the host's remembered one) disagrees
+  /// with [_target], sends a colour-scheme report through the same gated
+  /// path a live theme switch uses, so the program re-asks and this
+  /// terminal's own answer catches up. **Never fires on a null answer**:
+  /// before any answer, dark is correct by design (decision 157c), not a
+  /// disagreement to resolve — otherwise a program that merely draws `CSI
+  /// ?2031h` in replay, never having been asked anything, would be
+  /// answered for output alone (the invariant decision 132 fix b exists
+  /// for). A no-op once the answer catches up, with DEC 2031 off, or
+  /// already sent for this mismatch — so a session shown again, or shown
+  /// for the first time since the app's theme changed, asks at most once.
+  /// Call on a view becoming visible, after any
+  /// [remembered]/[rememberedSchemeReport].
+  ///
+  /// Built here, not [Terminal.reportColorSchemeChange], because that
+  /// answers only for [_terminal]'s own DEC 2031 state — exactly the gap
+  /// this closes when only the host's remembered state knows it is on.
+  void catchUpTheme() {
+    final known = answered.value;
+    if (known == null || known == _target) {
+      _catchUpSentFor = null;
+      return;
+    }
+    if (!_schemeReportEnabled || _catchUpSentFor == _target) return;
+    _reply(_schemeReportFor(_target));
+  }
+
+  static String _schemeReportFor(Brightness target) =>
+      '\x1b[?997;${target == Brightness.light ? 2 : 1}n';
+
   void _reply(String data, {bool colour = false}) {
     final bytes = Uint8List.fromList(utf8.encode(data));
+    // A scheme report is marked sent only once it is confirmed to leave —
+    // via [replySent] once [onReply]'s gate lets it through, or here when
+    // there is no gate at all — never pre-emptively: one gated out (a
+    // hidden view, still replay) must be retried, not counted as done.
+    final schemeReport = _schemeReport.hasMatch(data);
     final reply = onReply;
     if (reply == null) {
       if (colour) _answeredHere = true;
+      if (schemeReport) _catchUpSentFor = _target;
       onInput?.call(bytes);
       return;
     }
     _colourPending = colour;
+    _schemeReportPending = schemeReport;
     try {
       reply(bytes);
     } finally {
       _colourPending = false;
+      _schemeReportPending = false;
     }
   }
 
@@ -584,6 +644,11 @@ class _StormTerminalViewState extends State<StormTerminalView> {
 
   StormTerminal get terminal => widget.terminal;
 
+  /// The theme catch-up fix: whether this View has already asked [terminal]
+  /// to catch up, so later rebuilds of the same mount leave a live switch
+  /// to its own mechanism (decision 157c) instead of racing it.
+  bool _catchUpChecked = false;
+
   @override
   void initState() {
     super.initState();
@@ -596,6 +661,9 @@ class _StormTerminalViewState extends State<StormTerminalView> {
     if (old.terminal != terminal) {
       old.terminal.answered.removeListener(_onAnswered);
       terminal.answered.addListener(_onAnswered);
+      // A different terminal is a different session shown: its own first
+      // catch-up check, not the old one's.
+      _catchUpChecked = false;
     }
   }
 
@@ -652,6 +720,15 @@ class _StormTerminalViewState extends State<StormTerminalView> {
     final appLight = Theme.of(context).brightness == Brightness.light;
     final target = prefs.target(Theme.of(context).brightness);
     terminal._target = target;
+    // The theme catch-up fix: this view's first build (fresh, or after a
+    // remount) is "became visible"; a live switch while it stays mounted
+    // is decision 157c's own mechanism's, below, so this runs once per
+    // mount rather than racing it every rebuild. A shell already follows
+    // [target] live.
+    if (!widget.shell && !_catchUpChecked) {
+      _catchUpChecked = true;
+      terminal.catchUpTheme();
+    }
     final shown = widget.shell
         ? target
         : terminal.answered.value ?? Brightness.dark;
