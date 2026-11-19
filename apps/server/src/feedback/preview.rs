@@ -8,9 +8,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// How long a preview answers `POST /v1/feedback` (decision 162b). Scaled
-/// down under test so a "does it expire" test costs milliseconds.
+/// down under test so a "does it expire" test costs seconds, not minutes —
+/// but not so far down that a slow CI runner (several sequential round
+/// trips, one of them encoding a multi-megabyte screenshot) expires one
+/// mid-test.
 pub const TTL: Duration = if cfg!(test) {
-    Duration::from_millis(300)
+    Duration::from_secs(2)
 } else {
     Duration::from_secs(10 * 60)
 };

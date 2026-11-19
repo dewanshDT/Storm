@@ -14921,11 +14921,14 @@ pub(crate) mod tests {
         }
     }
 
-    /// Polls `cond` until it is true or `storm-heavy-build`-grade patience
-    /// runs out — the forwarder's own poll interval is milliseconds under
-    /// test, so a real delivery or retry shows up quickly.
+    /// Polls `cond` until it is true or patience runs out — the forwarder's
+    /// own poll interval is milliseconds under test, so a real delivery or
+    /// retry shows up quickly on a normal box. The window is generous
+    /// (30 s) because a CI Windows runner is dramatically slower than a
+    /// dev box at exactly this (many small processes and TCP round trips),
+    /// not because any one case is expected to take anywhere near that long.
     async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if cond() {
                 return;
             }
@@ -14937,7 +14940,7 @@ pub(crate) mod tests {
     /// As [`eventually`], but for a condition that itself has to `.await`
     /// (the queue's own length) rather than one that can be polled plainly.
     async fn eventually_queue_len(queue: &crate::feedback::queue::Queue, want: i64) {
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if queue.len().await.unwrap_or(-1) == want {
                 return;
             }
