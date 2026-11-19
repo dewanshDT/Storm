@@ -6,7 +6,7 @@ import '../ui/controls.dart';
 import '../ui/settings/settings_widgets.dart' show promptForText;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
-import '../ui/widgets.dart' show PopoverItem, PopoverTone, StormCheckbox;
+import '../ui/widgets.dart' show PopoverItem, PopoverTone, StormCheckboxRow;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart' show agentKey, agentMono;
@@ -257,39 +257,33 @@ class _AddSessionsListState extends State<AddSessionsList> {
             ),
           ),
         for (final s in sessions)
-          InkWell(
+          StormCheckboxRow(
             key: Key('add-session-${s.id}'),
+            value: _ticked.contains(s.id),
+            onChanged: (_) => toggle(s.id),
+            checkboxSize: t.sp * 2,
             borderRadius: BorderRadius.circular(t.rControl * 0.8),
-            onTap: () => toggle(s.id),
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: t.sp * 0.75,
-                vertical: t.sp * 0.875,
-              ),
-              child: Row(
-                children: [
-                  StormCheckbox(
-                    value: _ticked.contains(s.id),
-                    size: t.sp * 2,
-                    onChanged: (_) => toggle(s.id),
-                  ),
-                  SizedBox(width: t.sp),
-                  Expanded(
-                    child: Text(
-                      s.displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.codeSize,
-                        color: t.text,
-                      ),
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 0.75,
+              vertical: t.sp * 0.875,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    s.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.text,
                     ),
                   ),
-                  SizedBox(width: t.sp),
-                  Text(where(s), style: agentMono(t)),
-                ],
-              ),
+                ),
+                SizedBox(width: t.sp),
+                Text(where(s), style: agentMono(t)),
+              ],
             ),
           ),
         SizedBox(height: t.sp),

@@ -16,6 +16,7 @@ import '../../keyboard/storm_activators.dart';
 import '../../keyboard/storm_commands.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/feedback_state.dart' show actionTrailProvider;
 import '../../state/frecency.dart';
 import '../../state/palette_text.dart';
 import '../../state/palette_titles.dart';
@@ -164,6 +165,9 @@ Future<void> runPaletteChoice(
     case SessionTarget(:final sessionId):
       openAgentSession(context, sessionId);
     case CommandTarget(:final command):
+      // Content-free by construction: a command id, never its label or
+      // anything it acted on (decision 162c).
+      ref.read(actionTrailProvider.notifier).recordCommand(command.id);
       command.run(context, ref);
     case SettingsTarget(:final pageId):
       context.go(Routes.settingsPage(pageId));
