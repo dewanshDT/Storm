@@ -32,6 +32,7 @@ mod api;
 mod auth;
 mod backup;
 mod db;
+mod diag;
 mod discovery;
 mod firewall;
 mod frontmatter;
@@ -149,6 +150,27 @@ enum Commands {
         /// State directory holding vaults.json.
         #[arg(long, default_value = "./state")]
         state: PathBuf,
+    },
+    /// Print this server's diagnostics bundle (decision 162c): versions,
+    /// OS/arch, vault/relay/host counts and states (never names), and the
+    /// tail of a log file. For a headless machine, or a report sent
+    /// without the app.
+    ///
+    /// A CLI invocation is a separate process from any running server, so
+    /// its counts come from the state directory on disk rather than a
+    /// live registry, and it has no ring of recent lines to read — give
+    /// `--log-file` the same path `serve --log-file` is writing to, or
+    /// its logs are reported as unavailable.
+    Diag {
+        /// State directory holding vaults.json and auth.db.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
+        /// The running server's `--log-file`, if it has one.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+        /// How many of the log's last lines to include.
+        #[arg(long, default_value_t = diag::DEFAULT_LOG_LINES)]
+        lines: usize,
     },
     /// Back up the vaults, the indexes and the account into
     /// `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones:
@@ -1544,6 +1566,11 @@ pub async fn main() -> Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "storm_server=info,tower_http=warn".into())
     };
+
+    // Decision 162c: the ring layer is added alongside, never instead of,
+    // the layer below — existing output never changes.
+    use tracing_subscriber::prelude::*;
+    let ring = diag::install_ring();
     match &cli.log_file {
         Some(path) => {
             let file = std::fs::OpenOptions::new()
@@ -1551,13 +1578,23 @@ pub async fn main() -> Result<()> {
                 .append(true)
                 .open(path)
                 .with_context(|| format!("opening the log {}", path.display()))?;
-            tracing_subscriber::fmt()
-                .with_env_filter(filter())
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::sync::Mutex::new(file)),
+                )
+                .with(storm_diag::ring_layer(ring))
                 .init();
         }
-        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+        None => {
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(tracing_subscriber::fmt::layer())
+                .with(storm_diag::ring_layer(ring))
+                .init();
+        }
     }
 
     match cli.command {
@@ -1684,6 +1721,15 @@ pub async fn main() -> Result<()> {
                 std::process::exit(3);
             }
             println!("{}", registry.root.display());
+            Ok(())
+        }
+        Commands::Diag {
+            state,
+            log_file,
+            lines,
+        } => {
+            let bundle = diag::cli(&state, log_file.as_deref(), lines)?;
+            println!("{}", bundle.to_pretty_json()?);
             Ok(())
         }
     }

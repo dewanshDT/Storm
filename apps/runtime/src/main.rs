@@ -182,6 +182,31 @@ enum Command {
         #[arg(long, env = "STORM_RUNTIME_STATE")]
         state: Option<PathBuf>,
     },
+    /// Print this host's diagnostics bundle (decision 162c): its version,
+    /// OS/arch, execution profile and enrolled state (never a server
+    /// address or a workspace path), and the tail of a log file. For a
+    /// headless machine, or a report sent without the app.
+    ///
+    /// A CLI invocation is a separate process from a running `serve`, so
+    /// it has no live link to ask and always reports `online: false`,
+    /// and no ring of recent lines to read — give `--log-file` the same
+    /// path `serve --log-file` is writing to, or its logs are reported
+    /// as unavailable.
+    Diag {
+        /// The host's state: its key and `host.json`, chosen the way
+        /// `serve --state` is.
+        #[arg(long, env = "STORM_RUNTIME_STATE")]
+        state: Option<PathBuf>,
+        /// The host's `runtime.toml`, chosen the way `serve --config` is.
+        #[arg(long, env = "STORM_RUNTIME_CONFIG")]
+        config: Option<PathBuf>,
+        /// The running host's `--log-file`, if it has one.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+        /// How many of the log's last lines to include.
+        #[arg(long, default_value_t = storm_runtime::diag::DEFAULT_LOG_LINES)]
+        lines: usize,
+    },
     /// The Windows service's entry point (AM50). Run by the Service Control
     /// Manager, never by hand.
     #[cfg(windows)]
@@ -306,17 +331,31 @@ async fn main() -> Result<()> {
         } => {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into());
+            // Decision 162c: the ring layer is added alongside, never
+            // instead of, the layer below — existing output never changes.
+            use tracing_subscriber::prelude::*;
+            let ring = storm_runtime::diag::install_ring();
             match &log_file {
                 Some(path) => {
                     let log = storm_runtime::platform::open_log(path)
                         .with_context(|| format!("opening {}", path.display()))?;
-                    tracing_subscriber::fmt()
-                        .with_env_filter(filter)
-                        .with_ansi(false)
-                        .with_writer(std::sync::Mutex::new(log))
+                    tracing_subscriber::registry()
+                        .with(filter)
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_ansi(false)
+                                .with_writer(std::sync::Mutex::new(log)),
+                        )
+                        .with(storm_diag::ring_layer(ring))
                         .init();
                 }
-                None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+                None => {
+                    tracing_subscriber::registry()
+                        .with(filter)
+                        .with(tracing_subscriber::fmt::layer())
+                        .with(storm_diag::ring_layer(ring))
+                        .init();
+                }
             }
             if exclusive_account {
                 storm_runtime::platform::check_exclusive_account().map_err(anyhow::Error::msg)?;
@@ -386,6 +425,18 @@ async fn main() -> Result<()> {
                 config.host_id,
                 token.expires
             );
+            Ok(())
+        }
+        Command::Diag {
+            state,
+            config,
+            log_file,
+            lines,
+        } => {
+            let state = state_or_default(state)?;
+            let bundle =
+                storm_runtime::diag::cli(&state, config.as_deref(), log_file.as_deref(), lines)?;
+            println!("{}", bundle.to_pretty_json()?);
             Ok(())
         }
     }

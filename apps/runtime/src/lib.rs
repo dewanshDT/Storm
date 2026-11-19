@@ -73,6 +73,7 @@ pub mod connection;
 pub mod credential;
 pub mod credential_paths;
 pub mod cursor;
+pub mod diag;
 pub mod fake;
 pub mod fsutil;
 pub mod harness;
