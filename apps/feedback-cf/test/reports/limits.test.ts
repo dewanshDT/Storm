@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { postReport, reportBody, uniqueInstallId } from "../harness";
+import { env, runInDurableObject } from "cloudflare:test";
+import { afterEach, describe, expect, it } from "vitest";
+import { GLOBAL_DAILY_LIMIT, GLOBAL_LIMITER_NAME, GLOBAL_WINDOW_MS, IP_RATE_LIMIT } from "../../src/index";
+import { drainGlobalLimiter, postReport, reportBody, resetGlobalLimiter, uniqueInstallId } from "../harness";
+
+// TEST-NET-3 (RFC 5737): never a real address, so nothing outside this
+// suite could ever collide with it. Storage is isolated per test, so two
+// tests reusing the same literal IP never see each other's budget.
+const IP_A = "203.0.113.10";
+const IP_B = "203.0.113.20";
 
 const FIVE_MIB = 5 * 1024 * 1024;
 
@@ -45,5 +53,67 @@ describe("429: 20 reports per rolling hour per install_id", () => {
     expect((await postReport(reportBody({ install_id: a, text: "a20" }))).status).toBe(429);
     // A different install_id has its own untouched budget.
     expect((await postReport(reportBody({ install_id: b, text: "b0" }))).status).toBe(201);
+  });
+});
+
+// install_id is caller-chosen, so an abuser rotating random UUIDs would
+// otherwise never trip the 20/hour limit above; CF-Connecting-IP (attested
+// by Cloudflare's edge, never a client-set header) is the backstop.
+describe(`429: ${IP_RATE_LIMIT} reports per rolling hour per IP`, () => {
+  it(`allows ${IP_RATE_LIMIT} and refuses the next, even with a brand-new install_id, with a Retry-After`, async () => {
+    for (let i = 0; i < IP_RATE_LIMIT; i++) {
+      const res = await postReport(reportBody({ install_id: uniqueInstallId(), text: `ip ${i}` }), {
+        "cf-connecting-ip": IP_A,
+      });
+      expect(res.status, `request ${i}`).toBe(201);
+    }
+    const res = await postReport(reportBody({ install_id: uniqueInstallId(), text: "over the ip limit" }), {
+      "cf-connecting-ip": IP_A,
+    });
+    expect(res.status).toBe(429);
+    const retryAfter = Number(res.headers.get("retry-after"));
+    expect(Number.isFinite(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+  });
+
+  it("limits per IP, not globally: a different IP has its own budget", async () => {
+    const res = await postReport(reportBody({ install_id: uniqueInstallId(), text: "fresh ip" }), {
+      "cf-connecting-ip": IP_B,
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("skips the IP limiter entirely when CF-Connecting-IP is absent (local dev, direct tests)", async () => {
+    for (let i = 0; i < IP_RATE_LIMIT + 5; i++) {
+      const res = await postReport(reportBody({ install_id: uniqueInstallId(), text: `no ip ${i}` }));
+      expect(res.status, `request ${i}`).toBe(201);
+    }
+  });
+});
+
+describe(`503: a ${GLOBAL_DAILY_LIMIT}/day global cap on stored reports`, () => {
+  // The global limiter is one singleton DO; put its budget back so a later
+  // test (in this file or another) never inherits an artificially drained one.
+  afterEach(resetGlobalLimiter);
+
+  it("refuses with a Retry-After once the shared daily budget is spent", async () => {
+    await drainGlobalLimiter();
+
+    const res = await postReport(reportBody({ install_id: uniqueInstallId(), text: "past the global cap" }));
+    expect(res.status).toBe(503);
+    const retryAfter = Number(res.headers.get("retry-after"));
+    expect(Number.isFinite(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+  });
+
+  it("refills over the window like any other token bucket", async () => {
+    const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(GLOBAL_LIMITER_NAME));
+    await runInDurableObject(stub, async (_instance, state) => {
+      // A whole window ago: fully refilled by the time the request lands.
+      await state.storage.put("bucket", { tokens: 0, last: Date.now() - GLOBAL_WINDOW_MS });
+    });
+
+    const res = await postReport(reportBody({ install_id: uniqueInstallId(), text: "window refilled" }));
+    expect(res.status).toBe(201);
   });
 });

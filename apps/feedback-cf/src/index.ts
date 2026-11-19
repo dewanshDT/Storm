@@ -19,9 +19,19 @@ import {
 
 export { RateLimiter };
 
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
-const RATE_LIMIT = 20;
-const RATE_WINDOW_MS = 60 * 60 * 1000;
+export const MAX_BODY_BYTES = 5 * 1024 * 1024;
+export const RATE_LIMIT = 20;
+export const RATE_WINDOW_MS = 60 * 60 * 1000;
+// install_id is caller-chosen and free to rotate; this is the backstop a
+// UUID-rotating abuser can't dodge the way they can the per-install_id one.
+export const IP_RATE_LIMIT = 60;
+export const IP_RATE_WINDOW_MS = 60 * 60 * 1000;
+export const IP_LIMITER_PREFIX = "ip:";
+// A last, cheap cap on total stored reports a day, regardless of caller: the
+// two limits above each bound one abuser, not every abuser at once filling R2.
+export const GLOBAL_DAILY_LIMIT = 2000;
+export const GLOBAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const GLOBAL_LIMITER_NAME = "global";
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 500;
 
@@ -58,6 +68,15 @@ export default {
     await purgeExpired(env, event.scheduledTime);
   },
 };
+
+async function takeLimiter(env: Env, name: string, limit: number, windowMs: number) {
+  const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(name));
+  return stub.take(limit, windowMs);
+}
+
+function retryAfterHeader(retryAfterMs: number): Record<string, string> {
+  return { "Retry-After": String(Math.max(1, Math.ceil(retryAfterMs / 1000))) };
+}
 
 async function createReport(request: Request, env: Env): Promise<Response> {
   const contentLength = request.headers.get("content-length");
@@ -114,13 +133,29 @@ async function createReport(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  const limiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(body.install_id));
-  const taken = await limiter.take(RATE_LIMIT, RATE_WINDOW_MS);
-  if (!taken.allowed) {
-    log("report_rate_limited", { status: 429 });
-    return jsonResponse({ error: "rate limited" }, 429, {
-      "Retry-After": String(Math.max(1, Math.ceil(taken.retryAfterMs / 1000))),
-    });
+  const installTaken = await takeLimiter(env, body.install_id, RATE_LIMIT, RATE_WINDOW_MS);
+  if (!installTaken.allowed) {
+    log("report_rate_limited", { status: 429, reason: "install_id" });
+    return jsonResponse({ error: "rate limited" }, 429, retryAfterHeader(installTaken.retryAfterMs));
+  }
+
+  // CF-Connecting-IP, never a client-set header (Cloudflare's edge attests
+  // it, same as relay-cf's per-IP limits). Absent only off Cloudflare — local
+  // dev and these tests dial the Worker directly — where this check is
+  // simply skipped rather than refusing every request.
+  const ip = request.headers.get("cf-connecting-ip");
+  if (ip) {
+    const ipTaken = await takeLimiter(env, `${IP_LIMITER_PREFIX}${ip}`, IP_RATE_LIMIT, IP_RATE_WINDOW_MS);
+    if (!ipTaken.allowed) {
+      log("report_rate_limited", { status: 429, reason: "ip" });
+      return jsonResponse({ error: "rate limited" }, 429, retryAfterHeader(ipTaken.retryAfterMs));
+    }
+  }
+
+  const globalTaken = await takeLimiter(env, GLOBAL_LIMITER_NAME, GLOBAL_DAILY_LIMIT, GLOBAL_WINDOW_MS);
+  if (!globalTaken.allowed) {
+    log("report_capacity_exceeded", { status: 503 });
+    return jsonResponse({ error: "service busy" }, 503, retryAfterHeader(globalTaken.retryAfterMs));
   }
 
   const id = newReportId();

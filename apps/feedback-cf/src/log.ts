@@ -5,6 +5,7 @@ export type LogEvent =
   | "report_idempotent_replay"
   | "report_rejected"
   | "report_rate_limited"
+  | "report_capacity_exceeded"
   | "report_deleted"
   | "auth_failed"
   | "retention_purged";

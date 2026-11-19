@@ -4,6 +4,7 @@ import worker from "../../src/index";
 import { newReportId } from "../../src/id";
 import type { StoredReport } from "../../src/report";
 import { putReport, reportKey, RETENTION_MS, screenshotKey } from "../../src/store";
+import { postReport, reportBody, uniqueInstallId } from "../harness";
 
 async function seedAt(ms: number, text: string, withScreenshot = false): Promise<string> {
   const id = newReportId(ms);
@@ -46,5 +47,41 @@ describe("scheduled retention (decision 162j)", () => {
     await waitOnExecutionContext(ctx);
 
     expect(await env.FEEDBACK.head("reports/not-a-real-id-xxxxxxxxxx/report.json")).not.toBeNull();
+  });
+
+  it("also purges idempotency markers past the same window, so a late resend starts fresh", async () => {
+    const installId = uniqueInstallId();
+    const first = await postReport(reportBody({ install_id: installId, report_id: "late-resend" }));
+    expect(first.status).toBe(201);
+    const firstId = ((await first.json()) as { id: string }).id;
+
+    // A real object, uploaded moments ago by the POST above; a scheduled run
+    // far enough past it that both it and the marker are past the cutoff.
+    const future = Date.now() + RETENTION_MS + 24 * 60 * 60 * 1000;
+    const ctx = createExecutionContext();
+    await worker.scheduled(createScheduledController({ scheduledTime: future }), env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(await env.FEEDBACK.head(reportKey(firstId))).toBeNull();
+
+    // The marker is gone too: the same report_id now starts a new report
+    // rather than replaying the (already-deleted) original.
+    const resend = await postReport(reportBody({ install_id: installId, report_id: "late-resend" }));
+    expect(resend.status).toBe(201);
+    expect(((await resend.json()) as { id: string }).id).not.toBe(firstId);
+  });
+
+  it("leaves a recent idempotency marker alone — nothing to purge yet", async () => {
+    const installId = uniqueInstallId();
+    const first = await postReport(reportBody({ install_id: installId, report_id: "recent" }));
+    const firstId = ((await first.json()) as { id: string }).id;
+
+    const ctx = createExecutionContext();
+    await worker.scheduled(createScheduledController(), env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const resend = await postReport(reportBody({ install_id: installId, report_id: "recent" }));
+    expect(resend.status).toBe(200);
+    expect(((await resend.json()) as { id: string }).id).toBe(firstId);
   });
 });

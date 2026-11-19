@@ -112,6 +112,28 @@ export async function purgeExpired(env: Env, now: number = Date.now()): Promise<
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
+  deleted += await purgeExpiredIdempotency(env, cutoff);
   if (deleted > 0) log("retention_purged", { count: deleted });
+  return deleted;
+}
+
+// Without this an idempotency marker outlives every report it dedupes and
+// `idempotency/` grows forever. 30 days matches reports' own window — ample,
+// since the user's server drops a queued send after 7 (decision 162b). R2's
+// own `uploaded` timestamp is enough: a marker has no id to decode a time
+// from, and reading every one's JSON body just to find `created_at` would
+// cost one GET per marker instead of one LIST.
+async function purgeExpiredIdempotency(env: Env, cutoff: number): Promise<number> {
+  let cursor: string | undefined;
+  let deleted = 0;
+  do {
+    const page = await env.FEEDBACK.list({ prefix: IDEMPOTENCY_PREFIX, cursor });
+    const stale = page.objects.filter((o) => o.uploaded.getTime() < cutoff).map((o) => o.key);
+    if (stale.length > 0) {
+      await env.FEEDBACK.delete(stale);
+      deleted += stale.length;
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
   return deleted;
 }
