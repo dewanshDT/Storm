@@ -451,6 +451,177 @@ class _Column extends StatelessWidget {
             ),
 
             _Card(
+              label: 'inbox header · kind badge',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  InboxHeader(
+                    title: 'Notifications',
+                    unreadCount: 3,
+                    actions: [
+                      IconBadgeButton(
+                        icon: LucideIcons.check_check,
+                        tooltip: 'Mark all read',
+                        dimension: t.sp * 3.25,
+                        onTap: () {},
+                      ),
+                      IconBadgeButton(
+                        icon: LucideIcons.settings,
+                        tooltip: 'Notification settings',
+                        dimension: t.sp * 3.25,
+                        onTap: () {},
+                      ),
+                      IconBadgeButton(
+                        icon: LucideIcons.ellipsis_vertical,
+                        tooltip: 'More',
+                        dimension: t.sp * 3.25,
+                        onTap: () {},
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: t.gap),
+                  Row(
+                    children: [
+                      KindBadge(
+                        icon: LucideIcons.circle_question_mark,
+                        color: t.accent,
+                      ),
+                      SizedBox(width: t.sp * 1.5),
+                      KindBadge(
+                        icon: LucideIcons.circle_alert,
+                        color: t.danger,
+                      ),
+                      SizedBox(width: t.sp * 1.5),
+                      KindBadge(
+                        icon: LucideIcons.circle_check_big,
+                        color: t.green,
+                      ),
+                      SizedBox(width: t.sp * 1.5),
+                      KindBadge(icon: LucideIcons.trash_2, color: t.amber),
+                      SizedBox(width: t.sp * 1.5),
+                      KindBadge(icon: LucideIcons.server_off, color: t.text3),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'notification row · group',
+              child: Column(
+                children: [
+                  NotificationRow(
+                    leading: KindBadge(
+                      icon: LucideIcons.circle_question_mark,
+                      color: t.accent,
+                    ),
+                    title: [
+                      TextSpan(
+                        text: 'tidier',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const TextSpan(text: ' needs you'),
+                    ],
+                    subtitle: 'Claude Code',
+                    unread: true,
+                    time: '3m',
+                    onTap: () {},
+                    onMenu: (_) {},
+                  ),
+                  NotificationRow(
+                    leading: KindBadge(
+                      icon: LucideIcons.square_terminal,
+                      color: t.text2,
+                    ),
+                    title: [
+                      TextSpan(
+                        text: 'tidier',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const TextSpan(text: ' sent a message'),
+                    ],
+                    subtitle: 'Codex',
+                    tag: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          LucideIcons.moon,
+                          size: t.labelSize * 1.1,
+                          color: t.text3,
+                        ),
+                        SizedBox(width: t.sp * 0.375),
+                        Flexible(
+                          child: Text(
+                            'During quiet hours',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontFamily: StormTokens.sansFamily,
+                              fontSize: t.labelSize * 1.09,
+                              color: t.text3,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    body: Container(
+                      margin: EdgeInsets.only(top: t.sp * 0.375),
+                      padding: EdgeInsets.only(left: t.sp * 0.875),
+                      decoration: BoxDecoration(
+                        border: Border(
+                          left: BorderSide(color: t.border, width: t.bw * 2),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'From the agent, via its terminal',
+                            style: TextStyle(
+                              fontFamily: StormTokens.sansFamily,
+                              fontSize: t.labelSize,
+                              fontWeight: FontWeight.w500,
+                              color: t.text3,
+                            ),
+                          ),
+                          SizedBox(height: t.sp * 0.25),
+                          Text(
+                            'tests failed on the second run',
+                            style: TextStyle(
+                              fontFamily: StormTokens.sansFamily,
+                              fontSize: t.labelSize * 1.09,
+                              color: t.text2,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    time: '1h',
+                    onTap: () {},
+                    onMenu: (_) {},
+                  ),
+                  NotificationGroupRow(
+                    leading: KindBadge(
+                      icon: LucideIcons.circle_check_big,
+                      color: t.green,
+                    ),
+                    title: [
+                      TextSpan(
+                        text: 'build-vm',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const TextSpan(text: ' · 3 updates'),
+                    ],
+                    subtitle: 'latest: finished its turn · Claude Code',
+                    expanded: false,
+                    onToggle: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
               label: 'states',
               child: Column(
                 children: [

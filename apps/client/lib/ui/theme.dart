@@ -134,6 +134,7 @@ abstract final class StormTheme {
       bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: t.surface,
         surfaceTintColor: Colors.transparent,
+        dragHandleColor: t.border,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(t.rCard)),
         ),

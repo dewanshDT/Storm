@@ -257,11 +257,17 @@ class ChoiceChips<T> extends StatelessWidget {
     required this.options,
     required this.selected,
     required this.onSelected,
+    this.dense = false,
   });
 
   final List<ChoiceOption<T>> options;
   final T? selected;
   final ValueChanged<T>? onSelected;
+
+  /// A tighter padding and `labelSize` text — a filter row under a compact
+  /// panel's own header (decision 161's redesign), rather than the
+  /// settings-page scale these default to.
+  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -275,6 +281,7 @@ class ChoiceChips<T> extends StatelessWidget {
             key: o.key,
             option: o,
             selected: o.value == selected,
+            dense: dense,
             onTap: onSelected == null ? null : () => onSelected!(o.value),
           ),
       ],
@@ -287,11 +294,13 @@ class _Chip<T> extends StatelessWidget {
     super.key,
     required this.option,
     required this.selected,
+    this.dense = false,
     this.onTap,
   });
 
   final ChoiceOption<T> option;
   final bool selected;
+  final bool dense;
   final VoidCallback? onTap;
 
   @override
@@ -312,8 +321,8 @@ class _Chip<T> extends StatelessWidget {
           borderRadius: radius,
           child: Padding(
             padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.5,
-              vertical: t.sp,
+              horizontal: t.sp * (dense ? 0.875 : 1.5),
+              vertical: t.sp * (dense ? 0.4 : 1),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -326,7 +335,7 @@ class _Chip<T> extends StatelessWidget {
                   option.label,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
+                    fontSize: dense ? t.labelSize * 1.09 : t.codeSize,
                     fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
                     color: selected ? t.accent : t.text,
                   ),

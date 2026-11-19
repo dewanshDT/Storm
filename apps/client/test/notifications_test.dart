@@ -422,21 +422,24 @@ void main() {
       final c = shellContainer(agentClient: agents.client);
       await pumpShell(tester, c, size: wide);
       await tester.pumpAndSettle();
+      // The badge excludes the silent n4 (decision 161's redesign, item
+      // 10): 3 of the 4 pushed notices actually notified.
       expect(
         find.descendant(
           of: find.byKey(const Key('bar-notifications')),
-          matching: find.text('4'),
+          matching: find.text('3'),
         ),
         findsOneWidget,
       );
       await tester.tap(find.byKey(const Key('bar-notifications')));
       await tester.pumpAndSettle();
-      expect(find.textContaining('alpha (Claude Code)'), findsOneWidget);
-      expect(
-        find.textContaining('alpha (Codex) via its terminal'),
-        findsOneWidget,
-      );
-      expect(find.text('Held: quiet hours'), findsOneWidget);
+      // n1–n3 share a session and fold into one group (item 5); n4 stays
+      // its own row and shows its held reason without expanding anything.
+      expect(find.text('During quiet hours'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('grp:n3')));
+      await tester.pumpAndSettle();
+      expect(find.text('Claude Code'), findsOneWidget);
+      expect(find.text('From the agent, via its terminal'), findsOneWidget);
       await tester.tap(find.byKey(const Key('notify-mark-all-read')));
       await tester.pumpAndSettle();
       expect(notif.items.every((n) => n['read_at'] != null), isTrue);
