@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../agent/integrations_api.dart';
+import '../api/feedback_models.dart' show FeedbackErrorContext;
 import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
@@ -11,6 +12,7 @@ import '../state/terminal_prefs.dart' show launchBrightness;
 import '../state/health.dart' show integrationsSummaryProvider;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
+import '../ui/error_snack.dart' show showErrorSnack;
 import '../ui/panels.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/shell/app_bar.dart' show pageTopInset;
@@ -201,9 +203,14 @@ Future<AgentSession?> resumeAgentSession(
     return launched;
   } catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.maybeOf(
-        context,
-      )?.showSnackBar(SnackBar(content: Text(describeFailure(e))));
+      final message = describeFailure(e);
+      showErrorSnack(
+        message,
+        reportContext: FeedbackErrorContext(
+          action: 'resume agent session',
+          message: message,
+        ),
+      );
     }
     return null;
   } finally {

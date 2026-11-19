@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/feedback_models.dart' show FeedbackErrorContext;
 import '../state/app_state.dart' show vaultsProvider;
 import '../state/terminal_prefs.dart' show launchBrightness;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
+import '../ui/error_snack.dart' show showErrorSnack;
 import '../ui/settings/settings_widgets.dart';
 import '../ui/states.dart';
 import '../ui/surfaces.dart' show showStormSheet;
@@ -279,12 +281,11 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
         final reason = older
             ? 'this server is too old to remove hosts'
             : describeFailure(e);
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(
-            content: Text(
-              "Revoked ${host.name}, but couldn't remove it: "
-              '$reason',
-            ),
+        showErrorSnack(
+          "Revoked ${host.name}, but couldn't remove it: $reason",
+          reportContext: FeedbackErrorContext(
+            action: 'remove host',
+            message: reason,
           ),
         );
       }

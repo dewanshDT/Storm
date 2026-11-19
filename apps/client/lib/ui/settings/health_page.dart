@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +8,8 @@ import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/client_version.dart';
 import '../../state/health.dart';
+import '../controls.dart' show SettingsRow;
+import '../report_sheet.dart' show showReportProblemSheet;
 import '../shell/app_bar.dart' show healthColor;
 import '../tokens.dart';
 import 'connection_page.dart' show serverAddress;
@@ -64,6 +67,17 @@ class HealthPage extends ConsumerWidget {
               onAction: () => context.go(Routes.settingsPage('hosts')),
             ),
         ],
+        SettingsRow(
+          key: const Key('report-problem'),
+          label: 'Report a problem',
+          sub: 'Send what happened, with diagnostics you can see first.',
+          trailing: Icon(
+            LucideIcons.chevron_right,
+            size: t.codeSize,
+            color: t.text2,
+          ),
+          onTap: () => showReportProblemSheet(context),
+        ),
         Padding(
           padding: EdgeInsets.only(top: t.sp * 2),
           child: Text(

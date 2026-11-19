@@ -915,6 +915,8 @@ class StormInput extends StatelessWidget {
     this.inputFormatters,
     this.onChanged,
     this.onSubmitted,
+    this.minLines,
+    this.maxLines = 1,
   });
 
   final TextEditingController? controller;
@@ -934,6 +936,11 @@ class StormInput extends StatelessWidget {
   final ValueChanged<String>? onChanged;
   final ValueChanged<String>? onSubmitted;
 
+  /// A multiline field ("What happened?") sets both this and [maxLines];
+  /// the default keeps every existing single-line caller unchanged.
+  final int? minLines;
+  final int? maxLines;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
@@ -950,6 +957,8 @@ class StormInput extends StatelessWidget {
       inputFormatters: inputFormatters,
       onChanged: onChanged,
       onSubmitted: onSubmitted,
+      minLines: minLines,
+      maxLines: maxLines,
       style: TextStyle(
         fontFamily: StormTokens.sansFamily,
         fontSize: t.bodySize,
@@ -1012,6 +1021,66 @@ class StormCheckbox extends StatelessWidget {
                 applyTextScaling: false,
               )
             : null,
+      ),
+    );
+  }
+}
+
+/// A square image preview with a remove button in its corner — a screenshot
+/// attached to a report (decision 162a), or any other image chosen before
+/// it's confirmed.
+class ImageThumbnail extends StatelessWidget {
+  const ImageThumbnail({
+    super.key,
+    required this.image,
+    required this.onRemove,
+    this.size,
+  });
+
+  final ImageProvider image;
+  final VoidCallback onRemove;
+  final double? size;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final side = size ?? t.sp * 11;
+    return SizedBox(
+      width: side,
+      height: side,
+      child: Stack(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(t.rControl),
+            child: Image(
+              image: image,
+              width: side,
+              height: side,
+              fit: BoxFit.cover,
+            ),
+          ),
+          Positioned(
+            top: t.sp * 0.5,
+            right: t.sp * 0.5,
+            child: Material(
+              color: t.surface.withValues(alpha: 0.85),
+              shape: const CircleBorder(),
+              child: InkWell(
+                onTap: onRemove,
+                customBorder: const CircleBorder(),
+                child: Padding(
+                  padding: EdgeInsets.all(t.sp * 0.375),
+                  child: Icon(
+                    LucideIcons.x,
+                    size: t.labelSize,
+                    color: t.text,
+                    semanticLabel: 'Remove',
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

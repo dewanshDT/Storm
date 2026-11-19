@@ -164,6 +164,25 @@ class _Column extends StatelessWidget {
             ),
 
             _Card(
+              label: 'v2 · multiline input · image thumbnail',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const StormInput(
+                    hintText: 'What happened?',
+                    minLines: 3,
+                    maxLines: 6,
+                  ),
+                  SizedBox(height: t.gap),
+                  ImageThumbnail(
+                    image: const AssetImage('assets/icon/storm_icon_full.png'),
+                    onRemove: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
               label: 'v2 · buttons',
               child: Wrap(
                 spacing: t.sp,
