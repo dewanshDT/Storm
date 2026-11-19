@@ -8,6 +8,10 @@ shows whether the service runs, a health probe, whether the firewall lets
 Storm in (with the command to fix it), and the server's name, id, key and
 relays. On Linux the log is `journalctl -u storm-server -f`.
 
+Stuck on something below, or anything else? **Report a problem** (⌘K, or
+Settings › About & health) sends what happened, with diagnostics you preview
+first — see [Report a problem](/docs/operate/reporting-problems/).
+
 | Symptom | Check |
 |---|---|
 | The app says it **couldn't reach the server** | Is the server running (`status`)? Is the device on the same network, or does the server have a relay? Does the firewall allow Storm from the local network ([Firewalls](/docs/install/firewalls/))? |

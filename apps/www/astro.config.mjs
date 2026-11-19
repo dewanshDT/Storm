@@ -86,7 +86,12 @@ export default defineConfig({
         { label: "MCP", items: ["docs/mcp/connect"] },
         {
           label: "Operate",
-          items: ["docs/operate/backups", "docs/operate/security", "docs/operate/troubleshooting"],
+          items: [
+            "docs/operate/backups",
+            "docs/operate/reporting-problems",
+            "docs/operate/security",
+            "docs/operate/troubleshooting",
+          ],
         },
         {
           label: "Reference",

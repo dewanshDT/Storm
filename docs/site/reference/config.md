@@ -68,3 +68,14 @@ roots under home folders on macOS and Windows; see
 `/var/lib/storm-runtime` also needs the unit widened with `ReadWritePaths`.
 OpenCode's own `mcp` settings are ignored in sessions: only Storm's
 integrations are ever offered to an agent.
+
+## Feedback settings
+
+Not in a file — stored on the server and changed with `PUT
+/v1/config/feedback` (session tier; no Settings page for either yet). See
+[Report a problem](/docs/operate/reporting-problems/).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` stops every send: the report sheet says reporting is off and nothing reaches the intake. |
+| `intake_url` | `https://feedback.storm.dev` | Where a queued report is forwarded. An empty string reports as not configured (`intake_configured: false`) to the app. |
