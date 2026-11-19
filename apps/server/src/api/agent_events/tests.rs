@@ -704,7 +704,7 @@ async fn a_new_notice_reaches_a_live_subscriber() {
     let mut rx = f.feed(QUICK, QUEUE);
     next_frame(&mut rx, Duration::from_secs(5)).await.unwrap(); // snapshot
 
-    let n = f.state.agent.send_test_notification().unwrap();
+    let n = f.state.agent.send_test_notification(None).unwrap();
     let (name, data) = next_frame(&mut rx, Duration::from_secs(5))
         .await
         .expect("a notification frame");
@@ -724,7 +724,7 @@ async fn a_read_syncs_to_a_second_subscriber() {
     next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
     next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
 
-    let n = f.state.agent.send_test_notification().unwrap();
+    let n = f.state.agent.send_test_notification(None).unwrap();
     let (name_a, data_a) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
     assert_eq!(name_a, "notification");
     assert_eq!(data_a["id"], n.id);
@@ -742,6 +742,157 @@ async fn a_read_syncs_to_a_second_subscriber() {
     let (name_b2, data_b2) = next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
     assert_eq!(name_b2, "notification_read");
     assert_eq!(data_b2["ids"][0], n.id);
+}
+
+/// Mark-as-unread: a row that goes read -> unread is a live `notification`
+/// frame again (it is unread now), flagged `reopened` so the client skips
+/// the toast — reaching every subscriber, not just the one that reopened
+/// it.
+#[tokio::test]
+async fn an_unread_reaches_every_subscriber_flagged_reopened() {
+    let dir = tempdir::TempDir::new("storm-161-notify-unread-live").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut a = f.feed(QUICK, QUEUE);
+    let mut b = f.feed(QUICK, QUEUE);
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    let (_, data_a) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        data_a["reopened"], false,
+        "a first-time unread row: {data_a}"
+    );
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap(); // notification_read
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let changed = f
+        .state
+        .agent
+        .mark_notifications_unread(std::slice::from_ref(&n.id))
+        .unwrap();
+    assert_eq!(changed.as_slice(), std::slice::from_ref(&n.id));
+
+    let (name_a, data_a) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_a, "notification");
+    assert_eq!(data_a["id"], n.id);
+    assert_eq!(data_a["reopened"], true, "{data_a}");
+    assert!(data_a.get("read_at").is_none(), "{data_a}");
+
+    let (name_b, data_b) = next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_b, "notification");
+    assert_eq!(data_b["id"], n.id);
+    assert_eq!(data_b["reopened"], true, "{data_b}");
+}
+
+/// `POST /v1/notifications/unread`, like every other notifications op, is
+/// the signed-in owner's alone — an `stk_` key or an agent actor never
+/// reaches it.
+#[tokio::test]
+async fn mark_notifications_unread_is_owner_only() {
+    let dir = tempdir::TempDir::new("storm-161-unread-owner").unwrap();
+    let f = fixture(dir.path()).await;
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+
+    for actor in [
+        Actor::Key {
+            key_id: "key_1".into(),
+            user_id: f.owner.clone(),
+        },
+        Actor::Agent {
+            session_id: "ags_1".into(),
+            host_id: HOST.into(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        },
+    ] {
+        let err = crate::ops::mark_notifications_unread(
+            &f.state,
+            &actor,
+            crate::ops::MarkUnread {
+                ids: vec![n.id.clone()],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (err.0, err.1.as_str()),
+            (StatusCode::FORBIDDEN, "owner_only")
+        );
+    }
+}
+
+#[tokio::test]
+async fn mark_notifications_unread_refuses_over_500_ids() {
+    let dir = tempdir::TempDir::new("storm-161-unread-max-ids").unwrap();
+    let f = fixture(dir.path()).await;
+    let err = crate::ops::mark_notifications_unread(
+        &f.state,
+        &Actor::Session {
+            user_id: f.owner.clone(),
+        },
+        crate::ops::MarkUnread {
+            ids: (0..501).map(|i| format!("ntf_{i}")).collect(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST, "{}", err.1);
+}
+
+/// A row reopened and then read again must still sync that read, and the
+/// subscriber's own `notif_unread_sent` bookkeeping must be right: a
+/// *second* reopen is picked up as a fresh `notification` too.
+#[tokio::test]
+async fn a_read_after_a_reopen_still_emits_notification_read() {
+    let dir = tempdir::TempDir::new("storm-161-notify-reopen-then-read").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap(); // notification
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap(); // notification_read
+
+    f.state
+        .agent
+        .mark_notifications_unread(std::slice::from_ref(&n.id))
+        .unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification", "{data}");
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification_read", "{data}");
+    assert_eq!(data["ids"][0], n.id);
+
+    // A second reopen is still a fresh `notification`, not swallowed by
+    // stale bookkeeping from the first.
+    f.state
+        .agent
+        .mark_notifications_unread(std::slice::from_ref(&n.id))
+        .unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification", "{data}");
+    assert_eq!(data["reopened"], true, "{data}");
 }
 
 #[tokio::test]
@@ -780,7 +931,7 @@ async fn a_read_before_ever_seen_unread_is_still_a_read() {
     let mut rx = f.feed(QUICK, QUEUE);
     next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
 
-    let n = f.state.agent.send_test_notification().unwrap();
+    let n = f.state.agent.send_test_notification(None).unwrap();
     f.state
         .agent
         .mark_notifications_read(std::slice::from_ref(&n.id), None)
@@ -1663,7 +1814,7 @@ async fn a_sessionless_notice_still_carries_a_deliver_hint() {
     let mut a = open_presence(&f.app, &bearer_a, "conn-a", false, None).await;
     a.expect("snapshot").await;
 
-    let n = f.state.agent.send_test_notification().unwrap();
+    let n = f.state.agent.send_test_notification(None).unwrap();
     let event = a.expect("notification").await;
     assert_eq!(event.data["id"], n.id);
     assert_eq!(event.data["deliver"], "os");
@@ -1715,4 +1866,325 @@ async fn revoking_a_device_clears_its_presence() {
         .find(|d| d["id"] == device_a)
         .expect("the revoked device is still listed, just marked revoked");
     assert!(row["revoked"].is_string());
+}
+
+// ---- 161h: delivery hardening (a bug-review audit of decision 161) -------
+
+/// Item 1: a presence entry whose `last_seen` is past
+/// `PRESENCE_IDLE_TIMEOUT` must be excluded from the deliver hint, even
+/// though its `active` flag is still `true` — this is what actually fixes
+/// a dead SSE connection, since nothing else ever notices one has gone
+/// quiet.
+#[tokio::test(start_paused = true)]
+async fn a_stale_presence_entry_is_excluded_even_though_active_is_still_true() {
+    let dir = tempdir::TempDir::new("storm-161h-presence-stale").unwrap();
+    let f = fixture(dir.path()).await;
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
+    a.expect("snapshot").await;
+    assert_eq!(
+        f.state.agent.deliver_hint_uncached(None),
+        Some(format!("toast:{device_a}")),
+        "fresh presence still toasts"
+    );
+
+    // No heartbeat at all for longer than the TTL — an old client, or a
+    // socket that is simply dead.
+    tokio::time::advance(Duration::from_secs(46)).await;
+
+    assert_eq!(
+        f.state.agent.deliver_hint_uncached(None),
+        Some("os".to_string()),
+        "stale past the TTL must not be trusted, whatever `active` says"
+    );
+}
+
+/// The same staleness check, but refreshed by the SSE heartbeat
+/// (`POST …/presence`) just like a real client's periodic call would —
+/// proving the fix is the staleness check itself, not merely the absence
+/// of a heartbeat.
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_keeps_sse_presence_fresh_past_what_a_single_gap_would_allow() {
+    let dir = tempdir::TempDir::new("storm-161h-presence-heartbeat").unwrap();
+    let f = fixture(dir.path()).await;
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
+    a.expect("snapshot").await;
+
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let response = f
+        .ask(post_json_with_auth(
+            "/v1/notifications/presence",
+            serde_json::json!({"connection_id": "conn-a", "state": "active"}),
+            &bearer_a,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    tokio::time::advance(Duration::from_secs(40)).await; // 60s since connect, 40s since the heartbeat
+    assert_eq!(
+        f.state.agent.deliver_hint_uncached(None),
+        Some(format!("toast:{device_a}")),
+        "the heartbeat 20s ago refreshed last_seen, so only 40s have really passed"
+    );
+
+    tokio::time::advance(Duration::from_secs(10)).await; // 50s since the heartbeat: past the TTL
+    assert_eq!(
+        f.state.agent.deliver_hint_uncached(None),
+        Some("os".to_string())
+    );
+}
+
+/// Item 1's WS half: `pump_ws` must close a connection that sends nothing
+/// inbound (no frame of any kind — a dead socket never even answers a
+/// `Ping` with a `Pong`) within its idle bound. Exercised over a real
+/// WebSocket (through a minimal upgrade route, not the full
+/// `/v1/agent/events` handler — the production bound is 45s, far too slow
+/// for a unit test, so this drives `pump_ws` directly with a short one).
+#[tokio::test]
+async fn pump_ws_closes_a_connection_that_never_sends_anything_inbound() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    async fn upgrade(ws: axum::extract::ws::WebSocketUpgrade) -> axum::response::Response {
+        ws.on_upgrade(|socket| async move {
+            let (_tx, rx) = mpsc::channel::<Frame>(1);
+            pump_ws(socket, rx, Duration::from_millis(200)).await;
+        })
+    }
+    let app = axum::Router::new().route("/ws", axum::routing::get(upgrade));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let request = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let (mut socket, handshake) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(handshake.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+    // The client never sends a thing back — not even a Pong, since the
+    // server here never pings at all (no `feed`, no keepalive ticking).
+    // Past its idle bound, the server must close the socket on its own.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match futures_util::StreamExt::next(&mut socket).await {
+                Some(Ok(_)) => continue,
+                Some(Err(_)) | None => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the idle socket must be closed by the server itself within 5s"
+    );
+    server.abort();
+}
+
+/// Item 2(a): the toasted device disconnects at t=5s, well within the 15s
+/// grace, while its notice is still unread — the hint flips to `os` and a
+/// fresh `notification` frame reaches every subscriber, including one
+/// that was already background the whole time.
+#[tokio::test(start_paused = true)]
+async fn a_toast_device_disconnecting_within_the_grace_flips_to_os() {
+    let dir = tempdir::TempDir::new("storm-161h-fallback-in-grace").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, _bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    f.state.agent.set_presence("conn-a", &device_a, true, None);
+
+    let mut toasted = f.feed(QUICK, QUEUE);
+    let mut background = f.feed(QUICK, QUEUE);
+    next_frame(&mut toasted, Duration::from_secs(5))
+        .await
+        .unwrap(); // snapshot
+    next_frame(&mut background, Duration::from_secs(5))
+        .await
+        .unwrap(); // snapshot
+
+    let n = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap()
+        .unwrap();
+    let (name, data) = next_frame(&mut toasted, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(name, "notification");
+    assert_eq!(data["id"], n.id);
+    assert_eq!(data["deliver"], format!("toast:{device_a}"));
+    let (_, data_bg) = next_frame(&mut background, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(data_bg["deliver"], format!("toast:{device_a}"));
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    f.state.agent.clear_presence("conn-a", &device_a);
+
+    let (name2, data2) = next_frame(&mut background, Duration::from_secs(5))
+        .await
+        .expect("a fresh notification frame, re-delivered as os");
+    assert_eq!(name2, "notification");
+    assert_eq!(data2["id"], n.id);
+    assert_eq!(data2["deliver"], "os");
+}
+
+/// Item 2(b): past the 15s grace, the same disconnect must not flip
+/// anything — the device simply going background or away later is
+/// ordinary, not a fallback trigger.
+#[tokio::test(start_paused = true)]
+async fn a_toast_device_disconnecting_past_the_grace_does_not_flip() {
+    let dir = tempdir::TempDir::new("storm-161h-fallback-past-grace").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, _bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    f.state.agent.set_presence("conn-a", &device_a, true, None);
+    let mut sub = f.feed(QUICK, QUEUE);
+    next_frame(&mut sub, Duration::from_secs(5)).await.unwrap(); // snapshot
+
+    let n = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap()
+        .unwrap();
+    let (_, data) = next_frame(&mut sub, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(data["id"], n.id);
+    assert_eq!(data["deliver"], format!("toast:{device_a}"));
+
+    tokio::time::advance(Duration::from_secs(20)).await; // past the 15s grace
+    f.state.agent.clear_presence("conn-a", &device_a);
+
+    let extra = next_frame(&mut sub, Duration::from_millis(300)).await;
+    assert!(extra.is_none(), "no re-delivery past the grace: {extra:?}");
+}
+
+/// Item 2(c): the notice was already read before the toast device goes
+/// away at t=5s — nothing to re-show, so no flip.
+#[tokio::test(start_paused = true)]
+async fn an_already_read_toast_does_not_flip_when_its_device_goes_away() {
+    let dir = tempdir::TempDir::new("storm-161h-fallback-already-read").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, _bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    f.state.agent.set_presence("conn-a", &device_a, true, None);
+    let mut sub = f.feed(QUICK, QUEUE);
+    next_frame(&mut sub, Duration::from_secs(5)).await.unwrap(); // snapshot
+
+    let n = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap()
+        .unwrap();
+    let (_, data) = next_frame(&mut sub, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(data["deliver"], format!("toast:{device_a}"));
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    let (name_r, data_r) = next_frame(&mut sub, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_r, "notification_read");
+    assert_eq!(data_r["ids"][0], n.id);
+
+    tokio::time::advance(Duration::from_secs(5)).await; // still within the grace
+    f.state.agent.clear_presence("conn-a", &device_a);
+
+    let extra = next_frame(&mut sub, Duration::from_millis(300)).await;
+    assert!(
+        extra.is_none(),
+        "nothing to re-show once it is already read: {extra:?}"
+    );
+}
+
+/// Item 2(d): a device with two live connections must not trigger the
+/// fallback just because one of them disconnects — only once it has no
+/// remaining active connection at all.
+#[tokio::test(start_paused = true)]
+async fn a_second_live_connection_keeps_the_device_active_so_nothing_flips() {
+    let dir = tempdir::TempDir::new("storm-161h-fallback-multi-conn").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, _bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    f.state.agent.set_presence("conn-1", &device_a, true, None);
+    f.state.agent.set_presence("conn-2", &device_a, true, None);
+    let mut sub = f.feed(QUICK, QUEUE);
+    next_frame(&mut sub, Duration::from_secs(5)).await.unwrap(); // snapshot
+
+    let n = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap()
+        .unwrap();
+    let (_, data) = next_frame(&mut sub, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(data["id"], n.id);
+    assert_eq!(data["deliver"], format!("toast:{device_a}"));
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    f.state.agent.clear_presence("conn-1", &device_a); // only one of its two connections
+
+    let extra = next_frame(&mut sub, Duration::from_millis(300)).await;
+    assert!(
+        extra.is_none(),
+        "device a is still active on conn-2: {extra:?}"
+    );
+}
+
+/// Item 4: the test notice targets the device that actually asked for
+/// it — not whichever active device's id happens to sort lowest, as
+/// `compute_deliver_hint`'s own arbitrary pick would give it.
+#[tokio::test]
+async fn send_test_notification_targets_the_requesting_device_not_the_lowest_id() {
+    let dir = tempdir::TempDir::new("storm-161h-test-notice-targeted").unwrap();
+    let f = fixture(dir.path()).await;
+    let (device_a, _bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (device_b, _bearer_b) = second_device(&f.state, &f.owner, "b").await;
+    f.state.agent.set_presence("conn-a", &device_a, true, None);
+    f.state.agent.set_presence("conn-b", &device_b, true, None);
+    // Whichever of the two does *not* sort lowest: if the fix were absent,
+    // `compute_deliver_hint` would pick the other one instead.
+    let requester = if device_a > device_b {
+        &device_a
+    } else {
+        &device_b
+    };
+
+    let n = f
+        .state
+        .agent
+        .send_test_notification(Some(requester))
+        .unwrap();
+    assert_eq!(
+        f.state.agent.deliver_hint_for(&n.id, None),
+        Some(format!("toast:{requester}")),
+        "must target whoever asked, not whoever sorts lowest"
+    );
+}
+
+/// Item 4: an `stk_`/agent key with no device (`device_id: None`) keeps
+/// today's behaviour unchanged — `compute_deliver_hint` picks normally.
+#[tokio::test]
+async fn send_test_notification_with_no_device_id_keeps_the_old_fallback() {
+    let dir = tempdir::TempDir::new("storm-161h-test-notice-fallback").unwrap();
+    let f = fixture(dir.path()).await;
+    let (device_a, _bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    f.state.agent.set_presence("conn-a", &device_a, true, None);
+
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    assert_eq!(
+        f.state.agent.deliver_hint_for(&n.id, None),
+        Some(format!("toast:{device_a}")),
+        "no device id: deliver_hint_for computes it normally, same as before"
+    );
 }

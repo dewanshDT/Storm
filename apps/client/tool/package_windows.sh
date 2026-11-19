@@ -25,6 +25,14 @@ for dll in msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do
   test -f "$build/$dll" || { echo "the MSVC runtime has no $dll" >&2; exit 1; }
 done
 
+# The toast branding icon (review item 9, decision 161): the build's own
+# copy of `app_icon.ico` is compiled into storm.exe's resources via
+# `Runner.rc`, never a loose file, but Windows' `IconUri` registry value
+# (what `WindowsInitializationSettings.iconPath` writes) needs a real path
+# on disk next to the exe — `windows_icon_path_io.dart` computes exactly
+# this path at runtime.
+cp windows/runner/resources/app_icon.ico "$build/"
+
 cp ../../LICENSE "$build/LICENSE.txt"
 cat > "$build/README-windows.txt" <<EOF
 Storm ${version} for Windows (x86_64)

@@ -19,7 +19,9 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    id("com.android.application") version "9.0.1" apply false
+    // androidx.core 1.19.0 (flutter_local_notifications ^23, decision 161)
+    // needs AGP 9.1.0+; 9.5.1 is the current stable 9.x release.
+    id("com.android.application") version "9.5.1" apply false
     id("org.jetbrains.kotlin.android") version "2.3.20" apply false
 }
 

@@ -93,6 +93,15 @@ const PACE: Pace = Pace {
     keepalive: Duration::from_secs(15),
 };
 
+/// 161h item 1: a WebSocket whose socket died silently (phone off Wi-Fi, a
+/// lid closed mid-session, a relay path that dropped) is closed once this
+/// long passes with no inbound frame at all — a `Pong` included, since
+/// axum surfaces one to the caller. 2x `PACE.keepalive`, so one missed
+/// `Ping` round trip is tolerated and two are not. Closing drops the
+/// caller's `PresenceGuard`, which already clears presence; this constant
+/// only decides how long a dead connection gets to look alive.
+const PRESENCE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Bounded like `/v1/stream`'s body: a reader that stops reading gets
 /// `resync`, never a growing queue.
 const QUEUE: usize = 64;
@@ -183,7 +192,7 @@ pub(super) async fn agent_events(
                 let _presence = presence_guard;
                 tokio::select! {
                     () = feed(state, changes, notify_changed, tx, PACE) => {}
-                    () = pump_ws(socket, rx) => {}
+                    () = pump_ws(socket, rx, PRESENCE_IDLE_TIMEOUT) => {}
                 }
             }),
             Err(rejection) => rejection.into_response(),
@@ -210,7 +219,10 @@ pub(super) async fn agent_events(
         .into_response()
 }
 
-async fn pump_ws(mut socket: WebSocket, mut rx: mpsc::Receiver<Frame>) {
+/// `idle_timeout` is [`PRESENCE_IDLE_TIMEOUT`] in production; a test calls
+/// this directly with a short one so it need not wait out the real bound.
+async fn pump_ws(mut socket: WebSocket, mut rx: mpsc::Receiver<Frame>, idle_timeout: Duration) {
+    let mut deadline = Instant::now() + idle_timeout;
     loop {
         tokio::select! {
             frame = rx.recv() => {
@@ -221,8 +233,9 @@ async fn pump_ws(mut socket: WebSocket, mut rx: mpsc::Receiver<Frame>) {
             }
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-                Some(Ok(_)) => {}
+                Some(Ok(_)) => deadline = Instant::now() + idle_timeout,
             },
+            () = tokio::time::sleep_until(deadline) => return,
         }
     }
 }

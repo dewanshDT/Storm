@@ -10,9 +10,11 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -89,6 +91,9 @@ void main() {
       }
       if (path.endsWith('/v1/notifications/read')) {
         return http.Response('{"read":[]}', 200);
+      }
+      if (path.endsWith('/v1/notifications/unread')) {
+        return http.Response('{"changed":1}', 200);
       }
       return http.Response('{"items":[],"cursor":0}', 200);
     }),
@@ -433,6 +438,69 @@ void main() {
       expect(find.byKey(const Key('notify-row-n3')), findsNothing);
       expect(find.byKey(const ValueKey('grp:n10')), findsOneWidget);
     });
+
+    // `NotificationRow`'s `onLongPress` (widgets.dart) falls back to this
+    // same `onMenu!(_anchor)` callback whenever the row sets no
+    // `onLongPress` of its own — notifications_ui.dart never does — so
+    // the mobile long-press path opens the exact same menu this exercises
+    // via mouse hover (the only trigger a widget test can reliably land
+    // on, since the anchor the popover needs only exists in the tree once
+    // the "···" button is built).
+    testWidgets(
+      'the row menu offers Mark as unread on a read row, Mark as read on '
+      'an unread one',
+      (tester) async {
+        tester.view.physicalSize = const Size(480, 1000);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+        final state = await buildState(tester, sampleItems());
+        await tester.pumpWidget(
+          harness(state, StormTheme.from(StormPreset.stormDark)),
+        );
+        await tester.pumpAndSettle();
+
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        addTearDown(mouse.removePointer);
+
+        // n1 is unread: hovering its row reveals the "···" button, whose
+        // menu offers "Mark as read" only.
+        await mouse.moveTo(
+          tester.getCenter(find.byKey(const Key('notify-row-n1'))),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byKey(const Key('notify-row-n1')),
+            matching: find.byIcon(LucideIcons.ellipsis),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('notify-menu-read-n1')), findsOneWidget);
+        expect(find.byKey(const Key('notify-menu-unread-n1')), findsNothing);
+        await tester.tapAt(const Offset(10, 10)); // dismiss the popover
+        await tester.pumpAndSettle();
+
+        // n3 is already read: its menu offers "Mark as unread" instead,
+        // and using it flips it back to unread.
+        await mouse.moveTo(
+          tester.getCenter(find.byKey(const Key('notify-row-n3'))),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byKey(const Key('notify-row-n3')),
+            matching: find.byIcon(LucideIcons.ellipsis),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('notify-menu-unread-n3')), findsOneWidget);
+        expect(find.byKey(const Key('notify-menu-read-n3')), findsNothing);
+        await tester.tap(find.byKey(const Key('notify-menu-unread-n3')));
+        await tester.pumpAndSettle();
+        expect(state.items.firstWhere((n) => n.id == 'n3').unread, isTrue);
+      },
+    );
 
     testWidgets('keyboard: down focuses the first row, enter opens it', (
       tester,

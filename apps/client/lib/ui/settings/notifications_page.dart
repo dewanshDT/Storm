@@ -25,6 +25,7 @@ import '../../agent/device_notification_prefs_state.dart';
 import '../../agent/notifications_models.dart';
 import '../../agent/notifications_state.dart';
 import '../../agent/this_device_local_prefs.dart';
+import '../../agent/web_notifications.dart';
 import '../controls.dart';
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
@@ -670,6 +671,13 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
 
   @override
   Widget build(BuildContext context) {
+    // Web notifications round: its own section, not this one — the
+    // secure-context gate, the "Enable notifications" button and its
+    // three-way permission state have no desktop equivalent, and forcing
+    // them through this widget's desktop-flavoured labels (`defaultTargetPlatform`
+    // is the host OS even under `kIsWeb`, never a "web" value of its own)
+    // would read wrong on at least one of the two.
+    if (kIsWeb) return const _ThisDeviceWebSection();
     if (!isDesktopPlatform) return const SizedBox.shrink();
     final deviceState = ref.watch(deviceNotificationPrefsProvider);
     final local = ref.watch(thisDeviceLocalPrefsProvider);
@@ -827,6 +835,223 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
   /// toggle one class off a set that names none, only off a set that
   /// names all of them.
   List<String> _withClass(DeviceNotificationPrefs prefs, String kind, bool on) {
+    final current = prefs.classes.isEmpty
+        ? List<String>.from(kDeviceNotificationClasses)
+        : List<String>.from(prefs.classes);
+    if (on) {
+      if (!current.contains(kind)) current.add(kind);
+    } else {
+      current.remove(kind);
+    }
+    return current;
+  }
+}
+
+/// Web notifications round: the browser `Notification` API, raised from
+/// the page itself while a tab is open (never Web Push, which stays
+/// 161-6/7). Its own section rather than a branch of
+/// [_ThisDeviceSectionState] above — the secure-context gate and the
+/// "Enable notifications" button's own gesture requirement have no
+/// desktop equivalent.
+class _ThisDeviceWebSection extends ConsumerStatefulWidget {
+  const _ThisDeviceWebSection();
+
+  @override
+  ConsumerState<_ThisDeviceWebSection> createState() =>
+      _ThisDeviceWebSectionState();
+}
+
+class _ThisDeviceWebSectionState extends ConsumerState<_ThisDeviceWebSection> {
+  WebNotificationPermission _permission = WebNotificationPermission.notAsked;
+  bool _enabling = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _permission = webNotificationPermission();
+  }
+
+  Future<void> _enable(DeviceNotificationPrefsState deviceState) async {
+    setState(() => _enabling = true);
+    try {
+      final result = await requestWebNotificationPermission();
+      if (!mounted) return;
+      setState(() {
+        _permission = result;
+        _enabling = false;
+      });
+      if (result == WebNotificationPermission.allowed) {
+        await _guard(context, () => deviceState.setEnabled(true));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _enabling = false);
+      settingsToast(context, describeFailure(e));
+    }
+  }
+
+  String get _permissionLabel => switch (_permission) {
+    WebNotificationPermission.insecureOrigin => 'Notifications need HTTPS',
+    WebNotificationPermission.notAsked => 'Not asked yet',
+    WebNotificationPermission.denied => 'Blocked in browser settings',
+    WebNotificationPermission.allowed => 'Allowed',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final deviceState = ref.watch(deviceNotificationPrefsProvider);
+    final local = ref.watch(thisDeviceLocalPrefsProvider);
+    final notifier = ref.watch(webNotifierProvider);
+    if (deviceState == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: Listenable.merge([deviceState, local, ?notifier]),
+      builder: (context, _) => _body(context, deviceState, local),
+    );
+  }
+
+  Widget _body(
+    BuildContext context,
+    DeviceNotificationPrefsState deviceState,
+    ThisDeviceLocalPrefs local,
+  ) {
+    final t = context.tokens;
+    if (_permission == WebNotificationPermission.insecureOrigin) {
+      return Padding(
+        padding: EdgeInsets.only(bottom: t.sp * 1.5),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const GroupLabel('This device', bottom: 10),
+            SettingsRow(
+              label: 'Notifications',
+              sub:
+                  '$_permissionLabel — open Storm via the relay, or '
+                  'another HTTPS address, to turn them on.',
+            ),
+            SizedBox(height: t.sp * 3),
+            const SettingsDivider(),
+            SizedBox(height: t.sp * 1.5),
+          ],
+        ),
+      );
+    }
+    final prefs = deviceState.prefs;
+    final ready =
+        _permission == WebNotificationPermission.allowed && prefs.enabled;
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const GroupLabel('This device', bottom: 10),
+          if (!ready)
+            SettingsRow(
+              label: 'Notifications on this device',
+              sub: _permissionLabel,
+              trailing: _permission == WebNotificationPermission.denied
+                  ? null
+                  : StormButton.outline(
+                      key: const Key('web-enable-notifications'),
+                      label: _enabling ? 'Enabling…' : 'Enable notifications',
+                      onPressed: _enabling
+                          ? null
+                          : () => unawaited(_enable(deviceState)),
+                    ),
+            )
+          else ...[
+            SettingsRow(
+              label: 'Notifications on this device',
+              sub: _permissionLabel,
+              trailing: StormToggle(
+                key: const Key('device-notify-enabled'),
+                value: prefs.enabled,
+                onChanged: (v) =>
+                    _guard(context, () => deviceState.setEnabled(v)),
+              ),
+            ),
+            SettingsRow(label: 'Delivery', sub: 'Only while this tab is open'),
+            SettingsRow(
+              label: 'Show',
+              divider: false,
+              trailing: ChoiceChips<String>(
+                key: const Key('device-preview'),
+                options: [
+                  for (final level in kDevicePreviewLevels)
+                    ChoiceOption(level, _kPreviewLabels[level] ?? level),
+                ],
+                selected: prefs.preview,
+                onSelected: (v) =>
+                    _guard(context, () => deviceState.setPreview(v)),
+              ),
+            ),
+            SizedBox(height: t.sp * 1.5),
+            GroupLabel('Send to this device', top: t.sp),
+            for (final kind in kDeviceNotificationClasses)
+              SettingsRow(
+                label: _kDeviceClassLabels[kind] ?? kind,
+                sub: prefs.classOn(kind) && _onWebClassCount(prefs) <= 1
+                    ? 'Use "Notifications on this device" to turn off the last one'
+                    : null,
+                divider: kind != kDeviceNotificationClasses.last,
+                trailing: StormToggle(
+                  key: Key('device-class-$kind'),
+                  value: prefs.classOn(kind),
+                  enabled:
+                      !(prefs.classOn(kind) && _onWebClassCount(prefs) <= 1),
+                  onChanged: (v) => _guard(
+                    context,
+                    () => deviceState.setClasses(_withWebClass(prefs, kind, v)),
+                  ),
+                ),
+              ),
+            SizedBox(height: t.sp * 1.5),
+            SettingsRow(
+              label: 'Sound',
+              divider: false,
+              trailing: StormToggle(
+                key: const Key('device-sound'),
+                value: local.soundOn,
+                onChanged: (v) => local.setSoundOn(v),
+              ),
+            ),
+            SizedBox(height: t.sp * 1.5),
+            SettingsButtonRow(
+              child: StormButton.outline(
+                key: const Key('device-send-test'),
+                label: 'Send a test notification',
+                onPressed: () async {
+                  try {
+                    final n = await deviceState.sendTest();
+                    unawaited(ref.read(webNotifierProvider)?.forceShow(n));
+                    if (context.mounted) {
+                      settingsToast(context, 'Sent — check this device.');
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      settingsToast(context, describeFailure(e));
+                    }
+                  }
+                },
+              ),
+            ),
+          ],
+          SizedBox(height: t.sp * 3),
+          const SettingsDivider(),
+          SizedBox(height: t.sp * 1.5),
+        ],
+      ),
+    );
+  }
+
+  int _onWebClassCount(DeviceNotificationPrefs prefs) => prefs.classes.isEmpty
+      ? kDeviceNotificationClasses.length
+      : kDeviceNotificationClasses.where(prefs.classOn).length;
+
+  List<String> _withWebClass(
+    DeviceNotificationPrefs prefs,
+    String kind,
+    bool on,
+  ) {
     final current = prefs.classes.isEmpty
         ? List<String>.from(kDeviceNotificationClasses)
         : List<String>.from(prefs.classes);

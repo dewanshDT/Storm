@@ -93,6 +93,48 @@ void main() {
       expect(state.items.where((n) => n.id == 'n1').single.unread, isFalse);
     });
 
+    test('markUnread is optimistic: the row flips before the round trip', () {
+      final completer = Completer<http.Response>();
+      final state = NotificationsState(
+        () => fakeApi((req) async => completer.future),
+        null,
+      );
+      state.applyEvent(AgentNotificationPushed(notif('n1', read: true)));
+      expect(state.unreadCount, 0);
+      final pending = state.markUnread(['n1']);
+      expect(
+        state.items.single.unread,
+        isTrue,
+        reason: 'flipped before the API call resolved',
+      );
+      expect(state.items.single.reopened, isTrue);
+      completer.complete(http.Response('{"changed":1}', 200));
+      return pending;
+    });
+
+    test('markUnread rolls back to exactly what was held on failure', () async {
+      final state = NotificationsState(
+        () => fakeApi((req) async => http.Response('', 500)),
+        null,
+      );
+      state.applyEvent(AgentNotificationPushed(notif('n1', read: true)));
+      await expectLater(state.markUnread(['n1']), throwsA(anything));
+      expect(state.items.single.unread, isFalse, reason: 'rolled back');
+      expect(state.items.single.reopened, isFalse);
+    });
+
+    test(
+      'markUnread is a no-op for an id this device holds nothing for',
+      () async {
+        final state = NotificationsState(
+          () => fakeApi((req) async => http.Response('{"changed":0}', 200)),
+          null,
+        );
+        await state.markUnread(['ntf_unknown']);
+        expect(state.items, isEmpty);
+      },
+    );
+
     test('notifications_cleared empties the held inbox', () {
       final state = NotificationsState(fakeApi, null);
       state.applyEvent(AgentNotificationPushed(notif('n1')));

@@ -412,6 +412,7 @@ impl Store {
              );",
         )?;
         migrate_crew_trees(&conn)?;
+        migrate_delete_off_notices(&conn)?;
         Ok(Self {
             conn,
             events: tokio::sync::watch::channel(0).0,
@@ -1567,6 +1568,35 @@ fn migrate_crew_trees(conn: &Connection) -> Result<()> {
         "INSERT INTO agent_migrations (name, applied_at, detail) VALUES (?1, ?2, ?3)",
         params![
             CREW_TREES_MIGRATION,
+            crate::index::now_rfc3339(),
+            detail.to_string()
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub const DELETE_OFF_NOTICES_MIGRATION: &str = "161h_delete_off_notices";
+
+/// 161h item 3, once: a notice whose event toggle was off was still being
+/// written as a silent row before the fix — wrong, since "off" means "I
+/// don't want these," unlike quiet hours or a pause, which the person
+/// still catches up on later. Deletes every row this ever happened to;
+/// `'quiet'`/`'paused'` rows are untouched.
+fn migrate_delete_off_notices(conn: &Connection) -> Result<()> {
+    let done = conn
+        .prepare("SELECT 1 FROM agent_migrations WHERE name = ?1")?
+        .exists([DELETE_OFF_NOTICES_MIGRATION])?;
+    if done {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let deleted = tx.execute("DELETE FROM notifications WHERE silent_reason = 'off'", [])?;
+    let detail = serde_json::json!({"deleted": deleted});
+    tx.execute(
+        "INSERT INTO agent_migrations (name, applied_at, detail) VALUES (?1, ?2, ?3)",
+        params![
+            DELETE_OFF_NOTICES_MIGRATION,
             crate::index::now_rfc3339(),
             detail.to_string()
         ],

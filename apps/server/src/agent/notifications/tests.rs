@@ -513,6 +513,110 @@ fn migrates_from_a_v0_18_0_db_without_losing_sessions() {
     }
 }
 
+/// A row exactly as an older server (before item 3's fix) would have
+/// written it — `insert_notice` itself now refuses ever to write one with
+/// `silent_reason = 'off'`, so the migration's own target state has to be
+/// seeded with a raw `INSERT`.
+fn raw_insert_notice(conn: &rusqlite::Connection, key: &str, silent_reason: Option<&str>) {
+    conn.execute(
+        "INSERT INTO notifications (id, seq, updated_seq, created, source, kind, title,
+             urgency, key, silent, silent_reason)
+         VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM notifications),
+                 (SELECT COALESCE(MAX(updated_seq), 0) + 1 FROM notifications),
+                 ?2, 'storm', 'needs_you', 't', 'normal', ?3, ?4, ?5)",
+        params![
+            format!("ntf_{key}"),
+            now(),
+            key,
+            silent_reason.is_some(),
+            silent_reason,
+        ],
+    )
+    .unwrap();
+}
+
+/// 161h item 3(b): a `silent_reason = 'off'` row written before the fix is
+/// deleted once at `Store::open`; `quiet`/`paused`/`muted` rows and an
+/// unheld row are untouched, and a second `open` is a no-op.
+#[test]
+fn the_off_rows_migration_deletes_off_rows_once() {
+    use crate::agent::store::{DELETE_OFF_NOTICES_MIGRATION, Store};
+
+    let dir = tempdir::TempDir::new("storm-161h-off-migration").unwrap();
+    let path = dir.path().join("agent.db");
+    {
+        let store = Store::open(&path).unwrap();
+        raw_insert_notice(&store.conn, "off1", Some("off"));
+        raw_insert_notice(&store.conn, "off2", Some("off"));
+        raw_insert_notice(&store.conn, "quiet1", Some("quiet"));
+        raw_insert_notice(&store.conn, "paused1", Some("paused"));
+        raw_insert_notice(&store.conn, "muted1", Some("muted"));
+        raw_insert_notice(&store.conn, "kept1", None);
+        // The migration already recorded itself (no 'off' rows existed
+        // yet when this `Store::open` ran it); undo that so the next
+        // `open` below sees an upgrade from before the fix, not a no-op.
+        store
+            .conn
+            .execute(
+                "DELETE FROM agent_migrations WHERE name = ?1",
+                [DELETE_OFF_NOTICES_MIGRATION],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let remaining: Vec<String> = {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT key FROM notifications ORDER BY key")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        remaining,
+        vec!["kept1", "muted1", "paused1", "quiet1"],
+        "every 'off' row is gone, nothing else is: {remaining:?}"
+    );
+    // Alongside this migration's own record, a fresh db's `Store::open`
+    // also leaves `CREW_TREES_MIGRATION` unaudited (nothing to move, but
+    // never run before) — find this one by name rather than assuming it
+    // is the only pending entry.
+    let pending = store.unaudited_migrations().unwrap();
+    let mine = pending
+        .iter()
+        .find(|m| m.name == DELETE_OFF_NOTICES_MIGRATION)
+        .expect("the migration recorded itself");
+    let detail: serde_json::Value = serde_json::from_str(&mine.detail).unwrap();
+    assert_eq!(detail["deleted"], 2, "off1 and off2");
+
+    store
+        .mark_migration_audited(DELETE_OFF_NOTICES_MIGRATION, &now())
+        .unwrap();
+    // Once: an 'off' row written after it, as no product path does, stays.
+    raw_insert_notice(&store.conn, "off3", Some("off"));
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert!(
+        !store
+            .unaudited_migrations()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == DELETE_OFF_NOTICES_MIGRATION),
+        "audited once, it must not reappear as pending"
+    );
+    let count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM notifications WHERE key = 'off3'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "the migration never runs a second time");
+}
+
 #[test]
 fn a_key_never_notifies_twice() {
     let conn = test_conn();
@@ -566,6 +670,95 @@ fn the_counter_never_goes_backwards_across_a_read_or_a_clear() {
         .unwrap()
         .unwrap();
     assert!(d.seq > c.seq, "the counter survives a clear");
+}
+
+// ---------------------------------------------------------------------
+// Mark-as-unread
+// ---------------------------------------------------------------------
+
+#[test]
+fn unread_round_trip_clears_read_state_and_sets_reopened() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    assert!(!n.reopened, "a fresh row has no read/unread history yet");
+
+    let read = mark_read(&conn, std::slice::from_ref(&n.id), None, &now()).unwrap();
+    assert_eq!(read.as_slice(), std::slice::from_ref(&n.id));
+
+    let unread = mark_unread(&conn, std::slice::from_ref(&n.id)).unwrap();
+    assert_eq!(unread.as_slice(), std::slice::from_ref(&n.id));
+
+    let row = conn
+        .query_row(
+            &format!("SELECT {NOTIF_COLUMNS} FROM notifications WHERE id = ?1"),
+            params![n.id],
+            row_to_notification,
+        )
+        .unwrap();
+    assert!(row.read_at.is_none(), "{row:?}");
+    assert!(row.reopened, "{row:?}");
+}
+
+/// A row that has never been read has nothing to reopen: an unknown or
+/// still-unread id is silently ignored, the same "already in the target
+/// state" no-op `mark_read` gives a double read.
+#[test]
+fn unread_ignores_an_unknown_or_already_unread_id() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    let changed = mark_unread(&conn, &[n.id.clone(), "ntf_nope".into()]).unwrap();
+    assert!(
+        changed.is_empty(),
+        "{changed:?} — a never-read row stays unread"
+    );
+}
+
+/// A cancelled row (a `key` replace, or `cancel_notify`) is gone, not
+/// reopenable — matching the brief's "unknown/cancelled ids ignored".
+#[test]
+fn unread_ignores_a_cancelled_row() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    mark_read(&conn, std::slice::from_ref(&n.id), None, &now()).unwrap();
+    conn.execute(
+        "UPDATE notifications SET cancelled = 1 WHERE id = ?1",
+        params![n.id],
+    )
+    .unwrap();
+    let changed = mark_unread(&conn, std::slice::from_ref(&n.id)).unwrap();
+    assert!(changed.is_empty(), "{changed:?}");
+}
+
+/// The unread's own bump moves `updated_seq` past whatever else has
+/// happened, the same guarantee `the_counter_never_goes_backwards_*` holds
+/// for a read — this is the same persisted counter, never reset.
+#[test]
+fn unread_bumps_updated_seq_past_a_later_insert() {
+    let conn = test_conn();
+    let a = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    mark_read(&conn, std::slice::from_ref(&a.id), None, &now()).unwrap();
+    let b = insert_notice(&conn, plain_notice("b"), None)
+        .unwrap()
+        .unwrap();
+    assert!(b.updated_seq > a.updated_seq);
+
+    mark_unread(&conn, std::slice::from_ref(&a.id)).unwrap();
+    let a_updated: i64 = conn
+        .query_row(
+            "SELECT updated_seq FROM notifications WHERE id = ?1",
+            params![a.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(a_updated > b.updated_seq, "the unread moved past b");
 }
 
 // ---------------------------------------------------------------------
@@ -774,18 +967,19 @@ fn a_delete_requests_reason_is_sanitised() {
 
 /// Q7: off by default — it is still written to the inbox, marked silent.
 #[test]
-fn a_child_event_is_silent_by_default() {
+fn a_child_event_is_off_by_default_so_never_reaches_the_inbox() {
+    // 161h item 3: "off" (here, by default rather than by the person's own
+    // choice) means it is never written at all, not even as a silent row.
     let (m, _d, _link) = manager();
     let parent = launch(&m);
     let child = launch(&m);
     m.insert_child_event_for_tests(&parent, &child, "reported");
     m.notifier_tick().unwrap();
     let got = m.list_notifications(0, 10).unwrap();
-    let child_notice = got
-        .iter()
-        .find(|n| n.kind == CHILD_FINISHED)
-        .expect("a child notice");
-    assert!(child_notice.silent, "off by default, so silent, not absent");
+    assert!(
+        !got.iter().any(|n| n.kind == CHILD_FINISHED),
+        "off by default, so absent — not even silent: {got:?}"
+    );
 }
 
 /// A latency regression (2026-11): every tick re-ran the attention and
@@ -995,11 +1189,73 @@ fn clearing_and_muting_bump_their_own_versions() {
 #[test]
 fn a_silent_row_records_why() {
     let conn = test_conn();
-    let n = insert_notice(&conn, plain_notice("sr"), Some("off"))
+    // Quiet hours and a pause still write a silent row the person catches
+    // up on later (unlike "off" — item 3, below — which writes nothing).
+    let n = insert_notice(&conn, plain_notice("sr"), Some("quiet"))
         .unwrap()
         .unwrap();
     assert!(n.silent);
-    assert_eq!(n.silent_reason, Some("off".to_string()));
+    assert_eq!(n.silent_reason, Some("quiet".to_string()));
+}
+
+/// 161h item 3: "off" means "I don't want these" — unlike quiet hours or a
+/// pause, it is never written at all, not even as a silent row.
+#[test]
+fn an_off_event_writes_nothing() {
+    let conn = test_conn();
+    let before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
+        .unwrap();
+    let made = insert_notice(&conn, plain_notice("off-nothing"), Some("off")).unwrap();
+    assert!(made.is_none(), "an off event must not even return a row");
+    let after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, after, "nothing was written to the inbox");
+}
+
+/// 161h item 3(a): through the real precedence (`silent_for`) and the one
+/// write path (`insert_notice`), an event whose toggle is off never shows
+/// up in `list_notifications` at all, while one quiet hours or a pause
+/// held back still does, marked silent.
+#[test]
+fn an_off_event_never_reaches_the_inbox_but_quiet_and_paused_still_do() {
+    let conn = test_conn();
+    let at = now();
+
+    let mut off_prefs = Prefs::defaults();
+    off_prefs.events.insert(
+        NEEDS_YOU.to_string(),
+        EventPref {
+            on: false,
+            threshold_s: None,
+        },
+    );
+    let off_silence = silent_for(&off_prefs, &[], NEEDS_YOU, Some("a"), Some("fake"), &at);
+    assert_eq!(off_silence, Some("off"));
+    insert_notice(&conn, plain_notice("off-row"), off_silence).unwrap();
+
+    let mut quiet_prefs = Prefs::defaults();
+    quiet_prefs.quiet_on = true;
+    quiet_prefs.quiet_start = "00:00".into();
+    quiet_prefs.quiet_end = "23:59".into();
+    let quiet_silence = silent_for(&quiet_prefs, &[], NEEDS_YOU, Some("a"), Some("fake"), &at);
+    assert_eq!(quiet_silence, Some("quiet"));
+    insert_notice(&conn, plain_notice("quiet-row"), quiet_silence).unwrap();
+
+    insert_notice(&conn, plain_notice("paused-row"), Some("paused")).unwrap();
+
+    let rows = list_notifications(&conn, 0, 100).unwrap();
+    let kept: Vec<&str> = rows.iter().map(|n| n.key.as_deref().unwrap()).collect();
+    assert_eq!(
+        kept,
+        vec!["quiet-row", "paused-row"],
+        "the off row must never reach the inbox, silent or not: {kept:?}"
+    );
+    assert!(
+        rows.iter().all(|n| n.silent),
+        "quiet/paused rows still write silent: {rows:?}"
+    );
 }
 
 /// Item 8: the summary counts only what quiet hours or the pause itself

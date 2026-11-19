@@ -72,6 +72,7 @@ class AgentNotification {
     this.silentReason,
     this.readAt,
     this.cancelled = false,
+    this.reopened = false,
     this.hasDeliverHint = false,
     this.deliver,
   });
@@ -103,6 +104,12 @@ class AgentNotification {
   final String? silentReason;
   final String? readAt;
   final bool cancelled;
+
+  /// Mark-as-unread: true once this row has gone read -> unread again —
+  /// server-persisted, never cleared (`notifications.reopened`). A live
+  /// `notification` frame carrying this is a reopen, not a first-time
+  /// unread row, and must never toast or raise an OS/web notification.
+  final bool reopened;
 
   /// Whether the live frame carried a `deliver` key *at all* (161-4
   /// review item 1): `false` means an older server, which never computed
@@ -144,6 +151,38 @@ class AgentNotification {
           silentReason: silentReason,
           readAt: at,
           cancelled: cancelled,
+          reopened: reopened,
+          hasDeliverHint: hasDeliverHint,
+          deliver: deliver,
+        );
+
+  /// Mark-as-unread's own optimistic update: clears [readAt] and sets
+  /// [reopened], mirroring what the server does (`mark_unread`). A no-op
+  /// on an already-unread row, the same "already in the target state"
+  /// shape [withReadAt] gives a double read.
+  AgentNotification withUnread() => readAt == null
+      ? this
+      : AgentNotification(
+          id: id,
+          seq: seq,
+          created: created,
+          source: source,
+          kind: kind,
+          sessionId: sessionId,
+          hostId: hostId,
+          provider: provider,
+          sessionTitle: sessionTitle,
+          noteVaultId: noteVaultId,
+          noteId: noteId,
+          title: title,
+          body: body,
+          urgency: urgency,
+          key: key,
+          silent: silent,
+          silentReason: silentReason,
+          readAt: null,
+          cancelled: cancelled,
+          reopened: true,
           hasDeliverHint: hasDeliverHint,
           deliver: deliver,
         );
@@ -169,6 +208,7 @@ class AgentNotification {
         silentReason: j['silent_reason'] as String?,
         readAt: j['read_at'] as String?,
         cancelled: j['cancelled'] as bool? ?? false,
+        reopened: j['reopened'] as bool? ?? false,
         hasDeliverHint: j.containsKey('deliver'),
         deliver: j['deliver'] as String?,
       );

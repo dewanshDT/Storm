@@ -229,6 +229,37 @@ class NotificationsState extends ChangeNotifier {
     }
   }
 
+  /// Mark-as-unread. Optimistic, like the rest of this class's mutations
+  /// are not — this one is, because [AgentNotification.withUnread]'s
+  /// effect (the row jumping into the unread filter, the badge ticking
+  /// up) is otherwise visibly delayed by a round trip. Rolled back to
+  /// exactly what was held before on failure, never a guessed `read_at`.
+  Future<void> markUnread(List<String> ids) async {
+    final before = {
+      for (final id in ids)
+        if (_byId[id] != null) id: _byId[id]!,
+    };
+    if (before.isEmpty) return;
+    for (final entry in before.entries) {
+      _byId[entry.key] = entry.value.withUnread();
+    }
+    _invalidate();
+    if (!_disposed) notifyListeners();
+    final api = _apiFactory();
+    try {
+      await api.markNotificationsUnread(ids);
+    } catch (e) {
+      for (final entry in before.entries) {
+        _byId[entry.key] = entry.value;
+      }
+      _invalidate();
+      if (!_disposed) notifyListeners();
+      rethrow;
+    } finally {
+      api.dispose();
+    }
+  }
+
   Future<void> markAllRead() async {
     final unread = [
       for (final n in _byId.values)

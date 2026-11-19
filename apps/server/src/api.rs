@@ -667,6 +667,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(notifications_list).delete(notifications_clear),
         )
         .route("/v1/notifications/read", post(notifications_read))
+        .route("/v1/notifications/unread", post(notifications_unread))
         .route(
             "/v1/notifications/prefs",
             get(notification_prefs_get).put(notification_prefs_put),
@@ -2930,6 +2931,16 @@ async fn notifications_read(
     ))
 }
 
+async fn notifications_unread(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::MarkUnread>,
+) -> ApiResult<Json<crate::ops::notifications::MarkUnreadResult>> {
+    Ok(Json(
+        crate::ops::mark_notifications_unread(&state, &actor, body).await?,
+    ))
+}
+
 async fn notifications_clear(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
@@ -3008,9 +3019,10 @@ async fn notifications_unpause(
 async fn notifications_test(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
 ) -> ApiResult<Json<crate::agent::notifications::Notification>> {
     Ok(Json(
-        crate::ops::send_test_notification(&state, &actor).await?,
+        crate::ops::send_test_notification(&state, &actor, device_of(&auth)).await?,
     ))
 }
 
@@ -21821,12 +21833,26 @@ pub(crate) mod tests {
             .filter(|(kind, _)| kind == crate::ops::EVENT_AGENT_MIGRATION)
             .map(|(_, d)| serde_json::from_str(&d).unwrap())
             .collect();
-        assert_eq!(audited.len(), 1);
-        assert_eq!(
-            audited[0]["migration"],
-            crate::agent::store::CREW_TREES_MIGRATION
-        );
-        assert_eq!(audited[0]["detail"]["moved"], serde_json::json!([]));
+        // A fresh db also has 161h's own migration pending (nothing to
+        // delete, but never run before either), audited alongside this
+        // one by the same generic sweep — find this one by name rather
+        // than assume it is the only audited migration, and check that
+        // each is audited exactly once rather than asserting a total.
+        for migration in [
+            crate::agent::store::CREW_TREES_MIGRATION,
+            crate::agent::store::DELETE_OFF_NOTICES_MIGRATION,
+        ] {
+            let mine: Vec<&serde_json::Value> = audited
+                .iter()
+                .filter(|a| a["migration"] == migration)
+                .collect();
+            assert_eq!(mine.len(), 1, "{migration} audited once: {audited:?}");
+        }
+        let crew_tree = audited
+            .iter()
+            .find(|a| a["migration"] == crate::agent::store::CREW_TREES_MIGRATION)
+            .unwrap();
+        assert_eq!(crew_tree["detail"]["moved"], serde_json::json!([]));
     }
 
     // ---- the spawning client's reads (decision 134-10, 145a) ----

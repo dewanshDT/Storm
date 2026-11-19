@@ -1441,10 +1441,16 @@ fn a_145_12_the_upgrade_moves_a_childs_crew_row_to_its_root_once() {
     for (child, crew) in [("ags_C", "crw_X"), ("ags_G", "crw_X"), ("ags_D", "crw_Z")] {
         assert_eq!(s.membership(child).unwrap().unwrap().id, crew, "{child}");
     }
+    // The raw batch's `DELETE FROM agent_migrations` wiped every
+    // migration's record, not only this one's, so a fresh db's own
+    // `161h_delete_off_notices` (nothing to delete, but never run before
+    // either) is pending too — find this one by name.
     let pending = s.unaudited_migrations().unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].name, CREW_TREES_MIGRATION);
-    let detail: serde_json::Value = serde_json::from_str(&pending[0].detail).unwrap();
+    let mine = pending
+        .iter()
+        .find(|m| m.name == CREW_TREES_MIGRATION)
+        .expect("the migration recorded itself");
+    let detail: serde_json::Value = serde_json::from_str(&mine.detail).unwrap();
     assert_eq!(
         detail["moved"]
             .as_array()
@@ -1470,6 +1476,12 @@ fn a_145_12_the_upgrade_moves_a_childs_crew_row_to_its_root_once() {
         .unwrap();
     drop(s);
     let s = Store::open(&path).unwrap();
-    assert!(s.unaudited_migrations().unwrap().is_empty());
+    assert!(
+        !s.unaudited_migrations()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == CREW_TREES_MIGRATION),
+        "audited once, it must not reappear as pending"
+    );
     assert_eq!(s.members("crw_X").unwrap(), ["ags_P", "ags_D"]);
 }
