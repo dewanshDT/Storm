@@ -120,6 +120,7 @@ final routerProvider = Provider<GoRouter>((ref) {
   ref.onDispose(refresh.dispose);
 
   final router = GoRouter(
+    navigatorKey: rootNavigatorKey,
     initialLocation: Routes.root,
     refreshListenable: refresh,
     redirect: (context, state) {

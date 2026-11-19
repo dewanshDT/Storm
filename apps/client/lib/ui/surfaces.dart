@@ -7,6 +7,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
+import 'breakpoints.dart';
 import 'widgets.dart';
 import 'tokens.dart';
 
@@ -92,6 +93,48 @@ Future<T?> showStormSheet<T>({
           title: title,
           onClose: () => Navigator.of(sheetContext).pop(),
           child: builder(sheetContext),
+        ),
+      ),
+    ),
+  );
+}
+
+/// Raises [builder]'s content as a dialog at desk width, a [StormSheet]
+/// bottom sheet on a phone — the split "Report a problem" (decision 162a)
+/// wanted and no sheet here had yet. A later sheet that needs the same split
+/// should reach for this rather than hand-rolling the `context.isExpanded`
+/// branch again.
+Future<T?> showAdaptiveSheet<T>({
+  required BuildContext context,
+  required String title,
+  required WidgetBuilder builder,
+  double heightFactor = 0.6,
+  double dialogMaxWidth = 480,
+}) {
+  if (!context.isExpanded) {
+    return showStormSheet<T>(
+      context: context,
+      title: title,
+      heightFactor: heightFactor,
+      builder: builder,
+    );
+  }
+  final t = context.tokens;
+  return showDialog<T>(
+    context: context,
+    builder: (dialogContext) => Dialog(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(t.rCard),
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: dialogMaxWidth,
+          maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.85,
+        ),
+        child: StormSheet(
+          title: title,
+          onClose: () => Navigator.of(dialogContext).pop(),
+          child: builder(dialogContext),
         ),
       ),
     ),

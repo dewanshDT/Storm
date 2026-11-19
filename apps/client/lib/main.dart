@@ -34,7 +34,13 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Themes not loaded, using the built-in ones: $e');
   }
-  runApp(const ProviderScope(child: StormApp()));
+  runApp(
+    ProviderScope(
+      // Wraps everything the app paints, so a report's screenshot (decision
+      // 162a) captures the whole app rather than one screen.
+      child: RepaintBoundary(key: rootScreenshotKey, child: const StormApp()),
+    ),
+  );
 }
 
 class StormApp extends ConsumerStatefulWidget {

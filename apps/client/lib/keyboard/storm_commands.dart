@@ -14,6 +14,7 @@ import '../state/app_state.dart'
     show activeVaultProvider, openNoteIdProvider, sidebarCollapsedProvider;
 import '../state/nav_memory.dart';
 import '../ui/breakpoints.dart';
+import '../ui/report_sheet.dart' show showReportProblemSheet;
 import '../ui/shell/app_bar.dart' show goBack, goForward;
 import '../ui/palette/palette.dart' show openPalette;
 import '../ui/shell/create_here.dart';
@@ -345,6 +346,13 @@ List<StormCommand> stormCommands() => [
     synonyms: const ['dark mode', 'light mode', 'appearance'],
     group: StormCommandGroup.view,
     run: (context, _) => context.go(Routes.settingsPage('device')),
+  ),
+  StormCommand(
+    id: 'report-problem',
+    label: 'Report a problem',
+    synonyms: const ['feedback', 'bug report', 'send feedback'],
+    group: StormCommandGroup.navigate,
+    run: (context, _) => showReportProblemSheet(context),
   ),
 ];
 

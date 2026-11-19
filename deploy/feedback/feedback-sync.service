@@ -1,0 +1,52 @@
+# Not part of the Storm product — a standalone script that pulls reports out
+# of the intake Worker and files them into the vault as its own paired Storm
+# device, "feedback-sync". Run by feedback-sync.timer every 5 minutes; this
+# unit is also runnable directly for a one-off sync (`systemctl start
+# feedback-sync`).
+#
+# Manual install (see README.md for `pair`):
+#   sudo mkdir -p /opt/storm-feedback-sync
+#   sudo cp feedback-sync.py /opt/storm-feedback-sync/
+#   sudo cp feedback-sync.service feedback-sync.timer /etc/systemd/system/
+#   sudo cp feedback-sync.env.example /etc/storm-feedback-sync.env   # then edit it
+#   sudo chmod 600 /etc/storm-feedback-sync.env
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=Storm feedback sync (decision 162-6)
+Documentation=https://github.com/dewanshDT/Storm
+# Needs a route to both STORM_URL and INTAKE_URL.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# A transient, unprivileged account — this script holds one device
+# credential and nothing else worth a named user and a postinst. systemd
+# chowns StateDirectory to the transient UID on every activation, so the
+# credential survives even though the UID itself is not guaranteed stable.
+DynamicUser=yes
+EnvironmentFile=/etc/storm-feedback-sync.env
+ExecStart=/usr/bin/python3 /opt/storm-feedback-sync/feedback-sync.py run
+
+# The device credential and the synced-report map — created 0700, owned by
+# the transient UID.
+StateDirectory=storm-feedback-sync
+StateDirectoryMode=0700
+
+# Outbound HTTPS/HTTP to the Storm server and the intake Worker, and nothing
+# else: no LAN discovery, no local sockets.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+MemoryMax=256M

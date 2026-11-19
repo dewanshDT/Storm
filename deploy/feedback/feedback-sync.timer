@@ -1,0 +1,12 @@
+[Unit]
+Description=Storm feedback sync, every 5 minutes
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+# Catch up a run that was missed while the box was off.
+Persistent=true
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

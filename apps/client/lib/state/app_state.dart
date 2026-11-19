@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
 import '../api/connection_client.dart';
+import '../api/feedback_models.dart' show FeedbackErrorContext;
 import '../api/models.dart';
 import '../api/pairing_route.dart';
 import '../api/storm_connection.dart';
@@ -17,6 +18,7 @@ import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import 'secret_store.dart';
 import 'web_bootstrap.dart';
+import '../ui/error_snack.dart' show showErrorSnack;
 import '../ui/theme.dart';
 import '../ui/themes/theme_library.dart';
 import '../sync/sync_engine.dart';
@@ -1060,6 +1062,17 @@ final vaultRevisionProvider = StateProvider<int>((ref) => 0);
 /// a recovered edit can land while any page is open.
 final rootMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
+/// The app's root [Navigator] (decision 162a): a "Report this" snackbar
+/// action can fire from code with no `BuildContext` of its own — the sync
+/// recovery notice below runs inside a provider — and still needs one to
+/// raise the report sheet.
+final rootNavigatorKey = GlobalKey<NavigatorState>();
+
+/// Wraps everything Flutter paints, for a full-app screenshot taken the
+/// moment the report sheet opens, before the sheet itself is drawn
+/// (decision 162a).
+final rootScreenshotKey = GlobalKey();
+
 /// Keeps the open note and the vault views in step with incoming changes.
 ///
 /// Instantiated by the shell; nothing else depends on its value.
@@ -1084,12 +1097,12 @@ final syncListenerProvider = Provider<void>((ref) {
   final recovered = engine.recovered.listen((r) {
     final session = ref.read(noteSessionProvider);
     if (session.noteId == r.oldId) session.followRecovered(r);
-    rootMessengerKey.currentState?.showSnackBar(
-      SnackBar(
-        content: Text(
-          'A note you edited was deleted on another device. Your edit was '
-          'kept as ${r.path}.',
-        ),
+    showErrorSnack(
+      'A note you edited was deleted on another device. Your edit was '
+      'kept as ${r.path}.',
+      reportContext: const FeedbackErrorContext(
+        action: 'sync',
+        message: 'A note was recovered after a remote delete during sync.',
       ),
     );
   });

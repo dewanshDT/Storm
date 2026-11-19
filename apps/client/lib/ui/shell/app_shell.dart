@@ -6,6 +6,8 @@ import '../../agent/agent_notices.dart';
 import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/feedback_state.dart'
+    show actionTrailProvider, screenLabelOf;
 import '../../state/frecency.dart';
 import '../../state/nav_memory.dart';
 import '../../keyboard/storm_app_shortcuts.dart';
@@ -136,6 +138,11 @@ class _AppShellState extends ConsumerState<AppShell> {
       if (!mounted) return;
       ref.read(navMemoryProvider.notifier).visit(location);
       ref.read(navHistoryProvider.notifier).visit(location);
+      // Content-free (decision 162c): the route's shape only, never the
+      // vault, note, session or crew id `location` itself carries.
+      ref
+          .read(actionTrailProvider.notifier)
+          .visitScreen(screenLabelOf(Uri.parse(location)));
       if (frecencyIdOf(location) case final id?) {
         ref.read(frecencyProvider.notifier).opened(id);
       }

@@ -32,7 +32,9 @@ mod api;
 mod auth;
 mod backup;
 mod db;
+mod diag;
 mod discovery;
+mod feedback;
 mod firewall;
 mod frontmatter;
 mod fsutil;
@@ -149,6 +151,27 @@ enum Commands {
         /// State directory holding vaults.json.
         #[arg(long, default_value = "./state")]
         state: PathBuf,
+    },
+    /// Print this server's diagnostics bundle (decision 162c): versions,
+    /// OS/arch, vault/relay/host counts and states (never names), and the
+    /// tail of a log file. For a headless machine, or a report sent
+    /// without the app.
+    ///
+    /// A CLI invocation is a separate process from any running server, so
+    /// its counts come from the state directory on disk rather than a
+    /// live registry, and it has no ring of recent lines to read — give
+    /// `--log-file` the same path `serve --log-file` is writing to, or
+    /// its logs are reported as unavailable.
+    Diag {
+        /// State directory holding vaults.json and auth.db.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
+        /// The running server's `--log-file`, if it has one.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+        /// How many of the log's last lines to include.
+        #[arg(long, default_value_t = diag::DEFAULT_LOG_LINES)]
+        lines: usize,
     },
     /// Back up the vaults, the indexes and the account into
     /// `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones:
@@ -982,7 +1005,7 @@ fn pair_summary(uri: &str, expires: &str, session_id: &str, drew_qr: bool) -> St
     out
 }
 
-async fn run_serve(args: ServeArgs) -> Result<()> {
+async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
     let mut registry = prepared.registry;
     let state_dir = prepared.state_dir;
@@ -1203,6 +1226,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     }
 
     let host_names = auth_db.host_names().context("loading host names")?;
+    // Decision 162-3: opened before the queue's rows matter to anyone, so
+    // the forwarder below finds whatever a previous run left pending.
+    let feedback =
+        crate::feedback::Feedback::open(&state_dir).context("opening the feedback queue")?;
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1230,7 +1257,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
             discoverable,
             nettrust::NetTrust::new(args.test_untrusted_interfaces.clone()),
         ),
+        diag_ring,
+        feedback,
     });
+    // Decision 162b: one forwarder for the process's whole life, resuming
+    // whatever the queue already holds — a restart needs nothing special,
+    // since a pending row is simply one whose `next_attempt` is past.
+    tokio::spawn(crate::feedback::forwarder::run(state.clone()));
 
     ops::reconcile_single_user(&state)
         .await
@@ -1544,6 +1577,11 @@ pub async fn main() -> Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "storm_server=info,tower_http=warn".into())
     };
+
+    // Decision 162c: the ring layer is added alongside, never instead of,
+    // the layer below — existing output never changes.
+    use tracing_subscriber::prelude::*;
+    let ring = diag::install_ring();
     match &cli.log_file {
         Some(path) => {
             let file = std::fs::OpenOptions::new()
@@ -1551,17 +1589,27 @@ pub async fn main() -> Result<()> {
                 .append(true)
                 .open(path)
                 .with_context(|| format!("opening the log {}", path.display()))?;
-            tracing_subscriber::fmt()
-                .with_env_filter(filter())
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::sync::Mutex::new(file)),
+                )
+                .with(storm_diag::ring_layer(ring.clone()))
                 .init();
         }
-        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+        None => {
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(tracing_subscriber::fmt::layer())
+                .with(storm_diag::ring_layer(ring.clone()))
+                .init();
+        }
     }
 
     match cli.command {
-        Commands::Serve(args) => run_serve(args).await,
+        Commands::Serve(args) => run_serve(args, ring).await,
         #[cfg(unix)]
         Commands::Up(args) if cfg!(target_os = "macos") => {
             install_macos::up(install_macos::UpOptions {
@@ -1684,6 +1732,15 @@ pub async fn main() -> Result<()> {
                 std::process::exit(3);
             }
             println!("{}", registry.root.display());
+            Ok(())
+        }
+        Commands::Diag {
+            state,
+            log_file,
+            lines,
+        } => {
+            let bundle = diag::cli(&state, log_file.as_deref(), lines)?;
+            println!("{}", bundle.to_pretty_json()?);
             Ok(())
         }
     }

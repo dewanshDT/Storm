@@ -2735,6 +2735,439 @@ pub fn runtime_workspace_created(
         .map_err(agent_error)
 }
 
+// ---- Decision 162-2/162c: host diagnostics over the runtime link ----------
+
+/// How long the server waits for each host's diagnostics bundle (the
+/// feedback API contract's `gather_host_diags(timeout=5s)`).
+pub const HOST_DIAG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A host's answer to its own `diag` request.
+pub fn runtime_diag_answered(
+    state: &Shared,
+    host_id: &str,
+    request_id: &str,
+    diag: serde_json::Value,
+) -> ApiResult<()> {
+    state
+        .agent
+        .diag_answered(host_id, request_id, diag)
+        .map_err(agent_error)
+}
+
+/// One host's slot in a gathered diagnostics bundle: positional (`host-1`,
+/// `host-2`, …), never the host's own name (decision 162c: no hostnames in
+/// a bundle).
+#[derive(Debug, Clone, Serialize)]
+pub struct HostDiagEntry {
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diag: Option<storm_diag::Diag>,
+    /// `ok`, `no_reply` or `offline` (the feedback API contract).
+    pub status: &'static str,
+}
+
+async fn live_hosts(state: &Shared) -> Vec<crate::auth::hosts::Host> {
+    let auth_db = state.auth_db.lock().await;
+    auth_db
+        .list_hosts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| !h.is_revoked())
+        .collect()
+}
+
+/// Every name a diagnostics bundle must never carry verbatim: every vault's
+/// display name, this server's own identity name, and every enrolled host's
+/// display name (revoked ones too — an old log line in the ring can still
+/// name one). The server's identity name defaults to the machine's
+/// `/etc/hostname` (`default_server_name`), and a host's defaults to *its*
+/// machine's hostname (`storm_runtime::platform::host_name`, enroll's
+/// `--name`) — both are exactly the "hostname" decision 162c's `Out` list
+/// names. None of them has a shape a regex can find on its own, the same
+/// reason a vault's name needs this list rather than a pattern in
+/// `redact()`. Used for the server's own ring (`server_diag`) and, applied a
+/// second time, for every host's ring too (`feedback_preview`'s host loop) —
+/// a host's own ring doesn't know any of these names, so the re-redaction
+/// here is the only place that catches one leaking into its logs.
+async fn live_sensitive_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
+    let mut sensitive: Vec<storm_diag::Sensitive> = state
+        .vaults
+        .read()
+        .await
+        .registry
+        .vaults
+        .iter()
+        .map(|v| storm_diag::Sensitive::vault(v.name.clone()))
+        .collect();
+    sensitive.push(storm_diag::Sensitive::host(state.identity.name.clone()));
+    {
+        let auth_db = state.auth_db.lock().await;
+        for host in auth_db.list_hosts().unwrap_or_default() {
+            sensitive.push(storm_diag::Sensitive::host(host.name));
+        }
+    }
+    sensitive
+}
+
+/// Asks every enrolled, non-revoked host for its live diagnostics bundle, in
+/// parallel, each bounded by `timeout`. A host with no live link is
+/// `offline` without being asked; one that is asked and does not answer in
+/// time — or cannot, because it is an old host, or any other refusal — is
+/// `no_reply`. Unknown or late answers never reach here: a request this
+/// function has already given up waiting on is removed from the pending map
+/// before it returns, so the host's eventual post finds nothing to resolve
+/// and is ignored (`AgentManager::diag_answered`'s `NotFound`).
+pub async fn gather_host_diags(state: &Shared, timeout: std::time::Duration) -> Vec<HostDiagEntry> {
+    let hosts = live_hosts(state).await;
+    let asks = hosts.iter().enumerate().map(|(i, h)| {
+        let label = format!("host-{}", i + 1);
+        let host_id = h.id.clone();
+        async move {
+            if !state.agent.host_live(&host_id).online {
+                return HostDiagEntry {
+                    host: label,
+                    diag: None,
+                    status: "offline",
+                };
+            }
+            match state.agent.host_diag(&host_id, timeout).await {
+                Ok(diag) => HostDiagEntry {
+                    host: label,
+                    diag: Some(diag),
+                    status: "ok",
+                },
+                Err(_) => HostDiagEntry {
+                    host: label,
+                    diag: None,
+                    status: "no_reply",
+                },
+            }
+        }
+    });
+    futures_util::future::join_all(asks).await
+}
+
+/// The server's own live diagnostics bundle (decision 162-2/162c): the
+/// counts the CLI path already gathers, read live instead of from disk, and
+/// the ring's last 300 lines re-redacted with every vault's current
+/// display name — a vault renamed since a line was logged must not leave
+/// its old name in a bundle built today.
+pub async fn server_diag(state: &Shared) -> storm_diag::Diag {
+    let (vault_count, relay_count, relay_registered) = {
+        let vaults = state.vaults.read().await;
+        (
+            vaults.registry.vaults.len(),
+            vaults.registry.relays.len(),
+            vaults.registry.registered_relays.snapshot().len(),
+        )
+    };
+    let sensitive = live_sensitive_names(state).await;
+    let hosts = live_hosts(state).await;
+    let host_count = hosts.len();
+    let hosts_online = hosts
+        .iter()
+        .filter(|h| state.agent.host_live(&h.id).online)
+        .count();
+
+    let logs: Vec<String> = state
+        .diag_ring
+        .tail(crate::diag::DEFAULT_LOG_LINES)
+        .iter()
+        .map(|l| storm_diag::redact(l, &sensitive))
+        .collect();
+
+    storm_diag::Diag::new("storm-server", env!("CARGO_PKG_VERSION"))
+        .with_server(storm_diag::ServerDiag {
+            vault_count,
+            relay_count,
+            relay_registered: Some(relay_registered),
+            host_count,
+            hosts_online: Some(hosts_online),
+        })
+        .with_logs(logs)
+}
+
+pub const MAX_FEEDBACK_TEXT_CHARS: usize = 20_000;
+pub const MAX_FEEDBACK_EMAIL_CHARS: usize = 254;
+pub const MAX_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
+// The Worker's own limit on the whole forwarded body, screenshot included.
+pub const MAX_FORWARD_BYTES: usize = 5 * 1024 * 1024;
+const MAX_ACTIONS: usize = 20;
+const MAX_CONNECTION_LOG_LINES: usize = 200;
+
+fn feedback_disabled() -> ApiError {
+    ApiError(
+        axum::http::StatusCode::FORBIDDEN,
+        "feedback_disabled".into(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedbackKind {
+    Bug,
+    Idea,
+    Other,
+}
+
+impl FeedbackKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bug => "bug",
+            Self::Idea => "idea",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedbackStatus {
+    pub enabled: bool,
+    pub intake_configured: bool,
+}
+
+pub async fn feedback_status(state: &Shared) -> FeedbackStatus {
+    let vaults = state.vaults.read().await;
+    FeedbackStatus {
+        enabled: vaults.registry.feedback_enabled(),
+        intake_configured: vaults.registry.feedback_intake_configured(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetFeedbackSettings {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub intake_url: Option<String>,
+}
+
+pub async fn set_feedback_settings(
+    state: &Shared,
+    req: SetFeedbackSettings,
+) -> ApiResult<FeedbackStatus> {
+    let mut vaults = state.vaults.write().await;
+    if let Some(enabled) = req.enabled {
+        vaults.registry.set_feedback_enabled(enabled);
+    }
+    if let Some(url) = req.intake_url {
+        vaults.registry.set_feedback_intake_url(url);
+    }
+    vaults.registry.save(&state.state_dir)?;
+    Ok(FeedbackStatus {
+        enabled: vaults.registry.feedback_enabled(),
+        intake_configured: vaults.registry.feedback_intake_configured(),
+    })
+}
+
+fn redact_json(
+    value: &serde_json::Value,
+    sensitive: &[storm_diag::Sensitive],
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => serde_json::Value::String(storm_diag::redact(s, sensitive)),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(|v| redact_json(v, sensitive)).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), redact_json(v, sensitive)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn bound_client(mut client: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = client.as_object_mut() {
+        for (key, max) in [
+            ("actions", MAX_ACTIONS),
+            ("connection_log", MAX_CONNECTION_LOG_LINES),
+        ] {
+            if let Some(arr) = obj.get_mut(key).and_then(|v| v.as_array_mut())
+                && arr.len() > max
+            {
+                let excess = arr.len() - max;
+                arr.drain(0..excess);
+            }
+        }
+    }
+    client
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeedbackPreviewRequest {
+    pub kind: FeedbackKind,
+    #[serde(default)]
+    pub include_diagnostics: bool,
+    pub client: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FeedbackPreviewResponse {
+    pub preview_id: String,
+    pub expires_at: String,
+    pub client: serde_json::Value,
+    pub bundle: serde_json::Value,
+    pub bytes: u64,
+}
+
+pub async fn feedback_preview(
+    state: &Shared,
+    req: FeedbackPreviewRequest,
+) -> ApiResult<FeedbackPreviewResponse> {
+    if !state.vaults.read().await.registry.feedback_enabled() {
+        return Err(feedback_disabled());
+    }
+    if !req.client.is_object() {
+        return Err(bad_request("client must be an object"));
+    }
+    let sensitive = live_sensitive_names(state).await;
+    let client = redact_json(&bound_client(req.client), &sensitive);
+    let bundle = if req.include_diagnostics {
+        let server = server_diag(state).await;
+        let mut hosts = gather_host_diags(state, HOST_DIAG_TIMEOUT).await;
+        // A host's ring knows none of these names — not the vaults', not
+        // the server's own, not even its own — so re-redact here too.
+        for host in &mut hosts {
+            if let Some(diag) = host.diag.as_mut() {
+                diag.logs = diag
+                    .logs
+                    .iter()
+                    .map(|l| storm_diag::redact(l, &sensitive))
+                    .collect();
+            }
+        }
+        serde_json::json!({ "server": server, "hosts": hosts })
+    } else {
+        serde_json::json!({})
+    };
+    let bytes = serde_json::to_vec(&serde_json::json!({"client": client, "bundle": bundle}))
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+
+    let preview_id = format!("prv_{}", uuid::Uuid::new_v4());
+    {
+        let mut previews = state.feedback.previews.lock().unwrap();
+        previews.insert(
+            preview_id.clone(),
+            req.kind.as_str().to_string(),
+            client.clone(),
+            bundle.clone(),
+        );
+    }
+    let expires_at = (time::OffsetDateTime::now_utc() + crate::feedback::preview::TTL)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+
+    Ok(FeedbackPreviewResponse {
+        preview_id,
+        expires_at,
+        client,
+        bundle,
+        bytes,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeedbackSendRequest {
+    pub preview_id: String,
+    pub kind: FeedbackKind,
+    pub text: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub screenshot_png_b64: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FeedbackSendResponse {
+    pub report_id: String,
+    pub queued: bool,
+}
+
+pub async fn feedback_send(
+    state: &Shared,
+    req: FeedbackSendRequest,
+) -> ApiResult<FeedbackSendResponse> {
+    if !state.vaults.read().await.registry.feedback_enabled() {
+        return Err(feedback_disabled());
+    }
+    let chars = req.text.chars().count();
+    if chars == 0 || chars > MAX_FEEDBACK_TEXT_CHARS {
+        return Err(bad_request(format!(
+            "text must be 1..{MAX_FEEDBACK_TEXT_CHARS} characters"
+        )));
+    }
+    if let Some(email) = &req.email
+        && email.chars().count() > MAX_FEEDBACK_EMAIL_CHARS
+    {
+        return Err(bad_request(format!(
+            "email is at most {MAX_FEEDBACK_EMAIL_CHARS} characters"
+        )));
+    }
+    if let Some(b64) = &req.screenshot_png_b64 {
+        let decoded = data_encoding::BASE64
+            .decode(b64.as_bytes())
+            .map_err(|_| bad_request("screenshot_png_b64 is not valid base64"))?;
+        if decoded.len() > MAX_SCREENSHOT_BYTES {
+            return Err(bad_request(format!(
+                "a screenshot is at most {MAX_SCREENSHOT_BYTES} bytes decoded"
+            )));
+        }
+    }
+
+    let preview = {
+        let previews = state.feedback.previews.lock().unwrap();
+        previews.get(&req.preview_id)
+    };
+    let Some(preview) = preview else {
+        return Err(ApiError(
+            axum::http::StatusCode::GONE,
+            "preview_expired".into(),
+        ));
+    };
+    if preview.kind != req.kind.as_str() {
+        return Err(bad_request("kind_mismatch"));
+    }
+
+    let install_id = state.vaults.read().await.registry.install_id().to_string();
+    let report_id = uuid::Uuid::new_v4().to_string();
+    let mut forward = serde_json::json!({
+        "schema": 1,
+        "install_id": install_id,
+        "report_id": report_id,
+        "kind": req.kind.as_str(),
+        "text": req.text,
+        "client": preview.client,
+        "bundle": preview.bundle,
+    });
+    if let Some(email) = &req.email {
+        forward["email"] = serde_json::json!(email);
+    }
+    if let Some(screenshot) = &req.screenshot_png_b64 {
+        forward["screenshot_png_b64"] = serde_json::json!(screenshot);
+    }
+    let body = serde_json::to_string(&forward).map_err(|e| internal(e.to_string()))?;
+    if body.len() > MAX_FORWARD_BYTES {
+        return Err(bad_request("the report is too large to send"));
+    }
+
+    state
+        .feedback
+        .queue
+        .enqueue(&report_id, &body, &crate::index::now_rfc3339())
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    state.feedback.wake.notify_one();
+    tracing::info!(report_id, "feedback queued");
+
+    Ok(FeedbackSendResponse {
+        report_id,
+        queued: true,
+    })
+}
+
 // ---- Agent spawning: the spawn switch (decision 134-2) ---------------------
 //
 // Session tier and owner only: no `stk_` key and no agent turns it on (B1).
@@ -9028,6 +9461,7 @@ mod tests {
         let (root_changed, _) = tokio::sync::broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
         let host_names = auth_db.host_names().unwrap();
+        let feedback = crate::feedback::Feedback::open(&state_dir).unwrap();
 
         Arc::new(AppState {
             vaults: tokio::sync::RwLock::new(VaultSet {
@@ -9052,6 +9486,8 @@ mod tests {
             discovery: crate::discovery::Discovery::new(false, true),
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
+            diag_ring: storm_diag::Ring::default(),
+            feedback,
         })
     }
 

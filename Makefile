@@ -12,9 +12,14 @@ SERVER := apps/server
 RELAY  := apps/relay
 CONFORMANCE := tools/relay-conformance
 RELAY_CF := apps/relay-cf
+FEEDBACK_CF := apps/feedback-cf
 RUNTIME := apps/runtime
 # Per-session isolation's root helper (decision 136): its own small crate.
 ISOLATION := apps/runtime/isolation
+# Redaction, the log ring buffer and the `Diag` bundle shape (decision
+# 162c): a leaf crate both the server and the runtime depend on by path,
+# not a workspace joining them (R6) — its own small crate, its own target.
+DIAG := crates/storm-diag
 CLIENT := apps/client
 WWW    := apps/www
 
@@ -77,6 +82,7 @@ fmt-check:
 	cd $(CONFORMANCE) && cargo fmt --check
 	cd $(RUNTIME) && cargo fmt --check
 	cd $(ISOLATION) && cargo fmt --check
+	cd $(DIAG) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
 ## lint: clippy + dart analyze, all must be clean
@@ -86,14 +92,20 @@ lint:
 	cd $(CONFORMANCE) && cargo clippy --all-targets -- -D warnings
 	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
 	cd $(ISOLATION) && cargo clippy --all-targets -- -D warnings
+	cd $(DIAG) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-relay-cf test-runtime test-client
+test: test-server test-relay test-relay-cf test-feedback-cf test-runtime test-diag test-client test-feedback-sync
 
 ## test-server: Rust unit tests
 test-server:
 	cd $(SERVER) && cargo test
+
+## test-feedback-sync: the feedback sync service's unit tests (decision 162-6, stdlib only)
+test-feedback-sync:
+	python3 -m py_compile deploy/feedback/feedback-sync.py deploy/feedback/test_feedback_sync.py
+	python3 -m unittest deploy.feedback.test_feedback_sync -v
 
 ## test-relay: storm-relay unit + registration tests
 #
@@ -139,6 +151,13 @@ relay-conformance-cf:
 test-relay-cf:
 	cd $(RELAY_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
 
+## test-feedback-cf: the feedback intake Worker's typecheck + workerd tests (needs Node 22)
+#
+# Decision 162d. `npm ci` from the committed lockfile, then tsc and the vitest
+# suite, which runs inside workerd against a local R2 + Durable Object.
+test-feedback-cf:
+	cd $(FEEDBACK_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
+
 ## test-runtime: storm-runtime unit + provider-contract tests
 #
 # Standalone like the relay: `apps/runtime` never depends on `apps/server`
@@ -146,6 +165,10 @@ test-relay-cf:
 test-runtime:
 	cd $(RUNTIME) && cargo test
 	cd $(ISOLATION) && cargo test
+
+## test-diag: storm-diag unit tests (redaction fixtures, ring buffer, bundle shape)
+test-diag:
+	cd $(DIAG) && cargo test
 
 ## verify-isolation-units: systemd-analyze verify and security on the isolation helper's units (Linux)
 #
@@ -400,6 +423,7 @@ fmt:
 	cd $(CONFORMANCE) && cargo fmt
 	cd $(RUNTIME) && cargo fmt
 	cd $(ISOLATION) && cargo fmt
+	cd $(DIAG) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
 # ---- running --------------------------------------------------------
@@ -607,7 +631,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

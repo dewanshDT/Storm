@@ -6,6 +6,7 @@ import 'controls.dart';
 import 'session_status.dart';
 import 'settings/settings_widgets.dart' show SettingsDivider;
 import 'states.dart';
+import 'surfaces.dart' show showAdaptiveSheet;
 import 'theme.dart';
 import 'tokens.dart';
 import 'widgets.dart';
@@ -160,6 +161,76 @@ class _Column extends StatelessWidget {
                     ],
                   ),
                 ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · multiline input · image thumbnail',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const StormInput(
+                    hintText: 'What happened?',
+                    minLines: 3,
+                    maxLines: 6,
+                  ),
+                  SizedBox(height: t.gap),
+                  ImageThumbnail(
+                    image: const AssetImage('assets/icon/storm_icon_full.png'),
+                    onRemove: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · checkbox row · code block',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  StormCheckboxRow(
+                    key: const Key('gallery-checkbox-row-on'),
+                    value: true,
+                    onChanged: (_) {},
+                    child: const Text('Include diagnostics'),
+                  ),
+                  StormCheckboxRow(
+                    key: const Key('gallery-checkbox-row-off'),
+                    value: false,
+                    onChanged: (_) {},
+                    child: const Text('Include diagnostics'),
+                  ),
+                  const StormCheckboxRow(
+                    value: true,
+                    onChanged: null,
+                    child: Text('Disabled'),
+                  ),
+                  SizedBox(height: t.gap),
+                  CodeBlock(
+                    text:
+                        '{\n  "kind": "bug",\n  "screen": "settings/health"\n}',
+                    showCopy: true,
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · adaptive sheet',
+              child: StormButton.outline(
+                label: 'Open demo sheet',
+                onPressed: () => showAdaptiveSheet<void>(
+                  context: context,
+                  title: 'Adaptive sheet',
+                  builder: (_) => Text(
+                    'A dialog at desk width, a bottom sheet on a phone.',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: t.text,
+                    ),
+                  ),
+                ),
               ),
             ),
 

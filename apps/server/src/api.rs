@@ -142,6 +142,13 @@ pub struct AppState {
     /// LAN discovery's switch (decision 118): the advertisement follows it, and
     /// password pairing is refused while it is off.
     pub discovery: crate::discovery::Discovery,
+    /// This process's log ring (decision 162c): the same `Ring` the tracing
+    /// layer installed at startup writes into, so a diagnostics bundle reads
+    /// what actually happened, not a second, unwritten copy.
+    pub diag_ring: storm_diag::Ring,
+    /// In-app feedback (decision 162b): the preview store and the durable
+    /// send queue. The forwarder reads this through its own `Shared` clone.
+    pub feedback: crate::feedback::Feedback,
 }
 
 pub type Shared = Arc<AppState>;
@@ -423,6 +430,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/runtime/workspaces/{request}",
             post(runtime_workspace_created),
         )
+        // Host diagnostics (decision 162-2): a host's answer to `diag`, its
+        // request id in the body rather than the path — one host answers
+        // one ask, there is no per-request sub-resource to address.
+        .route(
+            "/v1/runtime/diag",
+            post(runtime_diag_answered).layer(axum::extract::DefaultBodyLimit::max(512 * 1024)),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -450,6 +464,18 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/relays", put(put_relays))
         .route("/v1/config/discovery", put(put_discovery))
+        .route("/v1/config/feedback", put(put_feedback_settings))
+        // 8 MiB: a base64 4 MiB screenshot alone is ~5.4 MiB.
+        .route(
+            "/v1/feedback",
+            get(get_feedback)
+                .post(post_feedback)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/feedback/preview",
+            post(post_feedback_preview).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
         // mint a key" true without a special case — a key never reaches here.
@@ -2256,6 +2282,23 @@ async fn runtime_workspace_created(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct DiagAnswer {
+    request_id: String,
+    diag: serde_json::Value,
+}
+
+/// `POST /v1/runtime/diag` (decision 162-2): a host's answer to `diag`,
+/// never another host's request.
+async fn runtime_diag_answered(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(body): Json<DiagAnswer>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_diag_answered(&state, &auth.host.id, &body.request_id, body.diag)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn agent_launch(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
@@ -3641,6 +3684,34 @@ async fn put_discovery(
         .map(Json)
 }
 
+async fn put_feedback_settings(
+    State(state): State<Shared>,
+    Json(body): Json<crate::ops::SetFeedbackSettings>,
+) -> ApiResult<Json<crate::ops::FeedbackStatus>> {
+    crate::ops::set_feedback_settings(&state, body)
+        .await
+        .map(Json)
+}
+
+async fn get_feedback(State(state): State<Shared>) -> Json<crate::ops::FeedbackStatus> {
+    Json(crate::ops::feedback_status(&state).await)
+}
+
+async fn post_feedback_preview(
+    State(state): State<Shared>,
+    Json(body): Json<crate::ops::FeedbackPreviewRequest>,
+) -> ApiResult<Json<crate::ops::FeedbackPreviewResponse>> {
+    crate::ops::feedback_preview(&state, body).await.map(Json)
+}
+
+async fn post_feedback(
+    State(state): State<Shared>,
+    Json(body): Json<crate::ops::FeedbackSendRequest>,
+) -> ApiResult<(StatusCode, Json<crate::ops::FeedbackSendResponse>)> {
+    let sent = crate::ops::feedback_send(&state, body).await?;
+    Ok((StatusCode::ACCEPTED, Json(sent)))
+}
+
 #[derive(Deserialize)]
 struct RelaysBody {
     relays: Vec<String>,
@@ -4645,6 +4716,7 @@ pub(crate) mod tests {
         let gateway =
             Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
         let host_names = auth_db.host_names().unwrap();
+        let feedback = crate::feedback::Feedback::open(&state_dir).unwrap();
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -4668,6 +4740,8 @@ pub(crate) mod tests {
             discovery: crate::discovery::Discovery::new(false, true),
             agent,
             gateway,
+            diag_ring: storm_diag::Ring::default(),
+            feedback,
         });
         (
             router(state.clone(), crate::mcp::McpOptions { allowed_hosts }),
@@ -14557,6 +14631,881 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ---- host diagnostics (decision 162-2) ---------------------------------
+
+    struct DiagFixture {
+        app: Router,
+        state: Shared,
+        owner_bearer: String,
+    }
+
+    async fn diag_fixture(dir: &FsPath) -> DiagFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        DiagFixture {
+            app,
+            state,
+            owner_bearer,
+        }
+    }
+
+    impl DiagFixture {
+        /// Enrolls, connects and says `hello` for a host that answers
+        /// `diag` (or not, if `diag` is false) — a stand-in for an old
+        /// host.
+        async fn connected_host(
+            &self,
+            diag: bool,
+        ) -> (
+            String,
+            String,
+            tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+        ) {
+            let (host, token) = enroll_a_host(&self.app, &self.owner_bearer).await;
+            let (_, link) = self.state.agent.connect_host(&host);
+            let mut caps = install_caps(false);
+            caps["diag"] = serde_json::json!(diag);
+            self.state
+                .agent
+                .hello(&host, serde_json::from_value(caps).unwrap())
+                .unwrap();
+            (host, format!("Bearer {token}"), link)
+        }
+
+        /// Enrolls a host and leaves it unconnected: offline.
+        async fn offline_host(&self) -> String {
+            enroll_a_host(&self.app, &self.owner_bearer).await.0
+        }
+
+        /// Answers one `diag` sent down `link` as a real host would.
+        async fn answer(
+            &self,
+            link: &mut tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+            host_bearer: &str,
+            logs: Vec<&str>,
+        ) -> String {
+            let sent = serde_json::to_value(link.recv().await.unwrap()).unwrap();
+            assert_eq!(sent["type"], "diag");
+            let request_id = sent["request_id"].as_str().unwrap().to_string();
+            let diag = serde_json::json!({
+                "schema": 1, "component": "storm-runtime", "version": "0.19.0",
+                "os": "linux", "arch": "x86_64",
+                "runtime": {"execution_profile": "off", "enrolled": true, "online": true},
+                "logs": logs,
+            });
+            let (status, _) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/runtime/diag",
+                    serde_json::json!({"request_id": request_id, "diag": diag}),
+                    host_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            request_id
+        }
+    }
+
+    /// 162-2: a host that says `diag` answers within the timeout, and its
+    /// bundle comes back `ok`, labelled positionally, never by its name.
+    #[tokio::test]
+    async fn gather_host_diags_reports_an_online_hosts_answer() {
+        let dir = tempdir::TempDir::new("storm-diag-ok").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (host, host_bearer, mut link) = f.connected_host(true).await;
+        let gather = crate::ops::gather_host_diags(&f.state, crate::ops::HOST_DIAG_TIMEOUT);
+        let answer = f.answer(&mut link, &host_bearer, vec!["session started"]);
+        let (entries, _) = tokio::join!(gather, answer);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host, "host-1");
+        assert_ne!(entries[0].host, host, "never the host's own name");
+        assert_eq!(entries[0].status, "ok");
+        let diag = entries[0].diag.as_ref().expect("a diag");
+        assert_eq!(diag.logs, vec!["session started".to_string()]);
+    }
+
+    /// A host with no live link at all is `offline` without being asked.
+    #[tokio::test]
+    async fn gather_host_diags_marks_an_unconnected_host_offline() {
+        let dir = tempdir::TempDir::new("storm-diag-offline").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let _host = f.offline_host().await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host, "host-1");
+        assert_eq!(entries[0].status, "offline");
+        assert!(entries[0].diag.is_none());
+    }
+
+    /// A connected host that never answers (or an old host that does not
+    /// say `diag`, so it is never even asked) is `no_reply`, not an error
+    /// that fails the whole gather.
+    #[tokio::test]
+    async fn gather_host_diags_times_out_a_silent_host_as_no_reply() {
+        let dir = tempdir::TempDir::new("storm-diag-no-reply").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, _bearer, _link) = f.connected_host(true).await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, "no_reply");
+        assert!(entries[0].diag.is_none());
+
+        // An old host, connected but never offering `diag`, is never even
+        // asked — the same `no_reply` result, with nothing sent down its
+        // link.
+        let (_old, _old_bearer, mut old_link) = f.connected_host(false).await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        let old = entries.iter().find(|e| e.status == "no_reply").unwrap();
+        assert!(old.diag.is_none());
+        assert!(old_link.try_recv().is_err(), "an old host is never asked");
+    }
+
+    /// A host's answer that arrives after the gather already gave up is
+    /// ignored: it resolves nothing, and the HTTP call it rides in on is a
+    /// plain 404, not a panic or a state change.
+    #[tokio::test]
+    async fn a_late_diag_answer_after_the_timeout_is_ignored() {
+        let dir = tempdir::TempDir::new("storm-diag-late").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, host_bearer, mut link) = f.connected_host(true).await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        assert_eq!(entries[0].status, "no_reply");
+
+        let sent = serde_json::to_value(link.recv().await.unwrap()).unwrap();
+        let request_id = sent["request_id"].as_str().unwrap().to_string();
+        let diag = serde_json::json!({
+            "schema": 1, "component": "storm-runtime", "version": "0.19.0",
+            "os": "linux", "arch": "x86_64", "logs": [],
+        });
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/runtime/diag",
+                serde_json::json!({"request_id": request_id, "diag": diag}),
+                &host_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a late answer is ignored");
+    }
+
+    /// Two hosts gather in positional order, and the labels never carry
+    /// either host's own name.
+    #[tokio::test]
+    async fn gather_host_diags_labels_are_positional_never_host_names() {
+        let dir = tempdir::TempDir::new("storm-diag-positional").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (host_a, bearer_a, mut link_a) = f.connected_host(true).await;
+        let (host_b, bearer_b, mut link_b) = f.connected_host(true).await;
+        let gather = crate::ops::gather_host_diags(&f.state, crate::ops::HOST_DIAG_TIMEOUT);
+        let answers = async {
+            tokio::join!(
+                f.answer(&mut link_a, &bearer_a, vec![]),
+                f.answer(&mut link_b, &bearer_b, vec![]),
+            )
+        };
+        let (entries, _) = tokio::join!(gather, answers);
+        assert_eq!(entries.len(), 2);
+        let labels: Vec<&str> = entries.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(labels, vec!["host-1", "host-2"]);
+        for entry in &entries {
+            assert_ne!(entry.host, host_a);
+            assert_ne!(entry.host, host_b);
+            assert_eq!(entry.status, "ok");
+        }
+    }
+
+    /// The server's own live bundle re-redacts its ring with every vault's
+    /// *current* display name, and never carries a host's name either.
+    #[tokio::test]
+    async fn server_diag_redacts_logs_with_live_vault_names() {
+        let dir = tempdir::TempDir::new("storm-diag-server").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        {
+            let mut vaults = f.state.vaults.write().await;
+            vaults
+                .registry
+                .create("Secret Vault", &crate::index::now_rfc3339())
+                .unwrap();
+        }
+        f.state
+            .diag_ring
+            .push("opened Secret Vault/Plan.md for editing");
+        let (host, _token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let diag = crate::ops::server_diag(&f.state).await;
+        let server = diag.server.expect("server diag");
+        assert_eq!(server.vault_count, 1);
+        assert_eq!(server.host_count, 1);
+        assert_eq!(server.hosts_online, Some(0));
+        let joined = diag.logs.join("\n");
+        assert!(!joined.contains("Secret Vault"), "{joined}");
+        assert!(!joined.contains(&host), "no hostname either: {joined}");
+    }
+
+    /// The server's own identity name — which defaults to this machine's
+    /// `/etc/hostname` (`default_server_name`) and is logged verbatim at
+    /// boot (`server identity … name=<name>`) — must never appear in its
+    /// own bundle either: decision 162c's `Out` list says "hostnames", and
+    /// a bare name has no shape the static redaction patterns can find on
+    /// their own, the same reason a vault's name needs the live list above.
+    #[tokio::test]
+    async fn server_diag_redacts_its_own_identity_name() {
+        let dir = tempdir::TempDir::new("storm-diag-identity").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let name = f.state.identity.name.clone();
+        f.state
+            .diag_ring
+            .push(&format!("server identity name={name} key_id=key_test"));
+        let diag = crate::ops::server_diag(&f.state).await;
+        let joined = diag.logs.join("\n");
+        assert!(
+            !joined.contains(&name),
+            "the server's own identity name leaked into its diag bundle: {joined}"
+        );
+    }
+
+    /// A host's own display name — `enroll_a_host`'s fixed `"build-vm"` —
+    /// must never survive into a diag bundle either, if it ever ends up in
+    /// that host's own ring (the host has no way to know its own name is
+    /// sensitive; only the server's re-redaction, with every enrolled
+    /// host's name now in the live list, catches it). `gather_host_diags`'s
+    /// positional labels already keep a host's name out of the `host`
+    /// field (see `gather_host_diags_labels_are_positional_never_host_names`
+    /// above); this is about the `logs` a host's own ring might carry.
+    #[tokio::test]
+    async fn feedback_preview_redacts_a_hosts_own_name_from_its_bundle() {
+        let dir = tempdir::TempDir::new("storm-diag-host-name").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, host_bearer, mut link) = f.connected_host(true).await;
+        let preview = crate::ops::feedback_preview(
+            &f.state,
+            crate::ops::FeedbackPreviewRequest {
+                kind: crate::ops::FeedbackKind::Bug,
+                include_diagnostics: true,
+                client: serde_json::json!({}),
+            },
+        );
+        let answer = f.answer(&mut link, &host_bearer, vec!["connected as build-vm"]);
+        let (preview, _) = tokio::join!(preview, answer);
+        let preview = preview.unwrap_or_else(|e| panic!("preview failed: {} {}", e.0, e.1));
+        let logs = preview.bundle["hosts"][0]["diag"]["logs"]
+            .as_array()
+            .expect("the host's logs")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logs.contains("build-vm"),
+            "the host's own name leaked into its diag bundle: {logs}"
+        );
+        assert!(logs.contains("<host>"), "{logs}");
+    }
+
+    // ---- in-app feedback (decision 162-3) ----------------------------------
+
+    type FakeRequests = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    type FakeScript = Arc<
+        std::sync::Mutex<std::collections::VecDeque<(StatusCode, Option<u64>, serde_json::Value)>>,
+    >;
+
+    struct FakeIntake {
+        url: String,
+        requests: FakeRequests,
+        script: FakeScript,
+    }
+
+    impl FakeIntake {
+        fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn answer(&self, status: StatusCode, retry_after: Option<u64>, body: serde_json::Value) {
+            self.script
+                .lock()
+                .unwrap()
+                .push_back((status, retry_after, body));
+        }
+    }
+
+    async fn fake_intake_reports(
+        State((requests, script)): State<(FakeRequests, FakeScript)>,
+        body: axum::body::Bytes,
+    ) -> Response {
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        requests.lock().unwrap().push(value);
+        match script.lock().unwrap().pop_front() {
+            Some((status, retry_after, body)) => {
+                let mut res = (status, Json(body)).into_response();
+                if let Some(secs) = retry_after {
+                    res.headers_mut().insert(
+                        axum::http::header::RETRY_AFTER,
+                        secs.to_string().parse().unwrap(),
+                    );
+                }
+                res
+            }
+            None => (
+                StatusCode::CREATED,
+                Json(serde_json::json!({"id": "fake-report"})),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn fake_intake() -> FakeIntake {
+        let requests: FakeRequests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let script: FakeScript = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let app = Router::new()
+            .route("/v1/reports", post(fake_intake_reports))
+            .with_state((requests.clone(), script.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        FakeIntake {
+            url: format!("http://{addr}"),
+            requests,
+            script,
+        }
+    }
+
+    // 30 s of patience: a CI Windows runner is far slower than a dev box
+    // at many small processes and TCP round trips.
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..3000 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    async fn eventually_queue_len(queue: &crate::feedback::queue::Queue, want: i64) {
+        for _ in 0..3000 {
+            if queue.len().await.unwrap_or(-1) == want {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the feedback queue never reached length {want}");
+    }
+
+    struct FeedbackFixture {
+        app: Router,
+        state: Shared,
+        owner_bearer: String,
+    }
+
+    impl FeedbackFixture {
+        fn spawn_forwarder(&self) {
+            tokio::spawn(crate::feedback::forwarder::run(self.state.clone()));
+        }
+
+        async fn set_intake_url(&self, url: &str) {
+            let mut vaults = self.state.vaults.write().await;
+            vaults.registry.set_feedback_intake_url(url.to_string());
+            vaults.registry.save(&self.state.state_dir).unwrap();
+        }
+    }
+
+    async fn feedback_fixture(dir: &FsPath, intake_url: &str) -> FeedbackFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let f = FeedbackFixture {
+            app,
+            state,
+            owner_bearer,
+        };
+        f.set_intake_url(intake_url).await;
+        f
+    }
+
+    fn client_info(screen: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": "0.19.0",
+            "platform": "linux-x86_64",
+            "client_kind": "desktop",
+            "screen": screen,
+            "actions": ["opened session"],
+            "error": null,
+            "connection_log": ["connected"],
+        })
+    }
+
+    async fn preview(
+        f: &FeedbackFixture,
+        kind: &str,
+        include_diagnostics: bool,
+        client: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/feedback/preview",
+                serde_json::json!({"kind": kind, "include_diagnostics": include_diagnostics, "client": client}),
+                &f.owner_bearer,
+            ),
+        )
+        .await
+    }
+
+    async fn submit(
+        f: &FeedbackFixture,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            &f.app,
+            post_json_with_auth("/v1/feedback", body, &f.owner_bearer),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn preview_equals_the_forwarded_bytes() {
+        let dir = tempdir::TempDir::new("storm-feedback-preview-eq").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (status, prev) = preview(&f, "bug", false, client_info("agents/session")).await;
+        assert_eq!(status, StatusCode::OK, "{prev}");
+        let preview_id = prev["preview_id"].as_str().unwrap().to_string();
+
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": preview_id, "kind": "bug", "text": "it broke",
+                "email": "a@b.c",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+        assert_eq!(sent["queued"], true);
+
+        eventually("the intake received the report", || {
+            !intake.requests().is_empty()
+        })
+        .await;
+        let forwarded = intake.requests().remove(0);
+        assert_eq!(forwarded["client"], prev["client"]);
+        assert_eq!(forwarded["bundle"], prev["bundle"]);
+        assert_eq!(forwarded["text"], "it broke");
+        assert_eq!(forwarded["kind"], "bug");
+        assert_eq!(forwarded["email"], "a@b.c");
+        assert_eq!(forwarded["report_id"], sent["report_id"]);
+        assert_eq!(forwarded["schema"], 1);
+        assert!(!forwarded["install_id"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_sends_are_retried_then_delivered() {
+        let dir = tempdir::TempDir::new("storm-feedback-offline").unwrap();
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let f = feedback_fixture(dir.path(), &dead).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "offline"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+        assert_eq!(f.state.feedback.queue.len().await.unwrap(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(
+            f.state.feedback.queue.len().await.unwrap(),
+            1,
+            "still queued while offline"
+        );
+        let intake = fake_intake().await;
+        f.set_intake_url(&intake.url).await;
+
+        eventually("it was delivered", || !intake.requests().is_empty()).await;
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    /// A row the forwarder has already given up waiting on past 7 days
+    /// (scaled under test) is dropped, never retried forever.
+    #[tokio::test]
+    async fn a_send_older_than_the_give_up_deadline_is_dropped() {
+        let dir = tempdir::TempDir::new("storm-feedback-give-up").unwrap();
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let f = feedback_fixture(dir.path(), &dead).await;
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (_, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "ancient"}),
+        )
+        .await;
+        f.state
+            .feedback
+            .queue
+            .backdate_for_tests(sent["report_id"].as_str().unwrap(), "2000-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        f.spawn_forwarder();
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    #[tokio::test]
+    async fn disabled_feedback_sends_nothing() {
+        let dir = tempdir::TempDir::new("storm-feedback-disabled").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let preview_id = prev["preview_id"].as_str().unwrap().to_string();
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], false);
+
+        let (status, body) = preview(&f, "bug", false, client_info("x")).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({"error": "feedback_disabled"})
+            )
+        );
+
+        let (status, body) = submit(
+            &f,
+            serde_json::json!({"preview_id": preview_id, "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({"error": "feedback_disabled"})
+            )
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(intake.requests().is_empty(), "nothing reached the intake");
+
+        let (status, body) = send(&f.app, get_with_auth("/v1/feedback", &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn disabling_feedback_holds_a_queued_send_until_re_enabled() {
+        let dir = tempdir::TempDir::new("storm-feedback-off-queue").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        f.spawn_forwarder();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(intake.requests().is_empty(), "nothing leaves while off");
+        assert_eq!(f.state.feedback.queue.len().await.unwrap(), 1);
+
+        let (status, body) = send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/feedback",
+                serde_json::json!({"enabled": true}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        eventually("it was delivered", || !intake.requests().is_empty()).await;
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_intake_status_is_retried_not_dropped() {
+        let dir = tempdir::TempDir::new("storm-feedback-404-retry").unwrap();
+        let intake = fake_intake().await;
+        intake.answer(
+            StatusCode::NOT_FOUND,
+            None,
+            serde_json::json!({"error": "not found"}),
+        );
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+
+        eventually_queue_len(&f.state.feedback.queue, 0).await;
+        assert!(intake.requests().len() >= 2, "retried past the 404");
+    }
+
+    #[tokio::test]
+    async fn an_expired_or_unknown_preview_is_410() {
+        let dir = tempdir::TempDir::new("storm-feedback-expired").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (status, body) = submit(
+            &f,
+            serde_json::json!({"preview_id": "prv_nope", "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::GONE,
+                serde_json::json!({"error": "preview_expired"})
+            )
+        );
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        tokio::time::sleep(crate::feedback::preview::TTL + std::time::Duration::from_millis(100))
+            .await;
+        let (status, body) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::GONE,
+                serde_json::json!({"error": "preview_expired"})
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn feedback_send_validates_text_email_kind_and_screenshot_size() {
+        let dir = tempdir::TempDir::new("storm-feedback-validate").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let pid = prev["preview_id"].clone();
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({"preview_id": pid, "kind": "bug", "text": ""}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "empty text");
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({"preview_id": pid, "kind": "bug", "text": "x".repeat(20_001)}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "text too long");
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": pid, "kind": "bug", "text": "ok",
+                "email": "a".repeat(255),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "email too long");
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({"preview_id": pid, "kind": "idea", "text": "ok"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "kind does not match the preview"
+        );
+
+        let too_big = data_encoding::BASE64.encode(&vec![0u8; 4 * 1024 * 1024 + 1]);
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": pid, "kind": "bug", "text": "ok",
+                "screenshot_png_b64": too_big,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "screenshot over 4 MiB decoded"
+        );
+
+        let (status, _) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": pid, "kind": "bug", "text": "ok",
+                "screenshot_png_b64": "not-base64!!",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "not valid base64");
+
+        // Fresh preview: the checks above can outlast the test TTL.
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let ok_shot = data_encoding::BASE64.encode(&vec![0u8; 1024]);
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({
+                "preview_id": prev["preview_id"], "kind": "bug", "text": "ok",
+                "screenshot_png_b64": ok_shot,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn client_strings_are_redacted_before_storage() {
+        let dir = tempdir::TempDir::new("storm-feedback-redact").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        {
+            let mut vaults = f.state.vaults.write().await;
+            vaults
+                .registry
+                .create("Secret Vault", &crate::index::now_rfc3339())
+                .unwrap();
+        }
+        let mut client = client_info("viewing Secret Vault");
+        client["actions"] = serde_json::json!(["opened Secret Vault"]);
+        client["error"] = serde_json::json!({
+            "action": "save", "message": "Authorization: Bearer stk_SUPERSECRETVALUE0123456789",
+        });
+
+        let (status, prev) = preview(&f, "bug", false, client).await;
+        assert_eq!(status, StatusCode::OK, "{prev}");
+        let joined = prev["client"].to_string();
+        assert!(!joined.contains("Secret Vault"), "{joined}");
+        assert!(!joined.contains("SUPERSECRETVALUE0123456789"), "{joined}");
+        assert!(joined.contains("<vault>"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn host_diag_logs_in_the_bundle_are_also_redacted() {
+        let dir = tempdir::TempDir::new("storm-feedback-host-redact").unwrap();
+        let intake = fake_intake().await;
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        {
+            let mut vaults = f.state.vaults.write().await;
+            vaults
+                .registry
+                .create("Secret Vault", &crate::index::now_rfc3339())
+                .unwrap();
+        }
+        let (host, token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (_, mut link) = f.state.agent.connect_host(&host);
+        let mut caps = install_caps(false);
+        caps["diag"] = serde_json::json!(true);
+        f.state
+            .agent
+            .hello(&host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+
+        let host_bearer = format!("Bearer {token}");
+        let gather = preview(&f, "bug", true, client_info("x"));
+        let answer = async {
+            let sent = serde_json::to_value(link.recv().await.unwrap()).unwrap();
+            let request_id = sent["request_id"].as_str().unwrap().to_string();
+            let diag = serde_json::json!({
+                "schema": 1, "component": "storm-runtime", "version": "0.19.0",
+                "os": "linux", "arch": "x86_64",
+                "logs": ["opened Secret Vault for editing"],
+            });
+            send(
+                &f.app,
+                post_json_with_auth(
+                    "/v1/runtime/diag",
+                    serde_json::json!({"request_id": request_id, "diag": diag}),
+                    &host_bearer,
+                ),
+            )
+            .await
+        };
+        let ((status, prev), _) = tokio::join!(gather, answer);
+        assert_eq!(status, StatusCode::OK, "{prev}");
+        let joined = prev["bundle"].to_string();
+        assert!(!joined.contains("Secret Vault"), "{joined}");
+        assert!(joined.contains("<vault>"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn retry_after_is_honoured_over_the_default_backoff() {
+        let dir = tempdir::TempDir::new("storm-feedback-retry-after").unwrap();
+        let intake = fake_intake().await;
+        intake.answer(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(100),
+            serde_json::json!({"error": "rate limited"}),
+        );
+        let f = feedback_fixture(dir.path(), &intake.url).await;
+        f.spawn_forwarder();
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+
+        eventually("the first attempt landed", || !intake.requests().is_empty()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert_eq!(
+            intake.requests().len(),
+            1,
+            "a 100 s Retry-After must not be re-tried after milliseconds"
+        );
     }
 
     fn child_listing(mode: &str) -> serde_json::Value {

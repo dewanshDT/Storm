@@ -259,6 +259,12 @@ pub enum Command {
         kind: String,
         mark: i64,
     },
+    /// Decision 162-2: ask a host for its live diagnostics bundle. The host
+    /// answers once, posting `request_id` and its `Diag` to
+    /// `/v1/runtime/diag`. Sent only to a host that says `diag` — an old
+    /// host is never asked, and its gather result is `no_reply`.
+    #[serde(rename = "diag")]
+    Diag { request_id: String },
 }
 
 impl Command {
@@ -278,6 +284,7 @@ impl Command {
             Self::WorkspaceCreate { .. } => "workspace.create",
             Self::Park { .. } => "park",
             Self::Wake { .. } => "wake",
+            Self::Diag { .. } => "diag",
         }
     }
 
@@ -296,7 +303,8 @@ impl Command {
             Self::Refresh
             | Self::AgentInstall { .. }
             | Self::ChildWorkspace { .. }
-            | Self::WorkspaceCreate { .. } => None,
+            | Self::WorkspaceCreate { .. }
+            | Self::Diag { .. } => None,
         }
     }
 }
@@ -391,6 +399,11 @@ pub struct Capabilities {
     /// not, and such a launch is refused `host_cannot_type`.
     #[serde(default)]
     pub typed_input: bool,
+    /// The host answers `diag` with its live diagnostics bundle (decision
+    /// 162-2). An old host does not say, and is never asked: its gather
+    /// result is `no_reply`, not a request it silently drops.
+    #[serde(default)]
+    pub diag: bool,
 }
 
 impl Capabilities {
@@ -1137,6 +1150,8 @@ pub struct AgentManager {
     children: Mutex<HashMap<String, HostPending>>,
     /// `workspace.create` requests waiting for their host's answer.
     new_workspaces: Mutex<HashMap<String, HostPending>>,
+    /// `diag` requests waiting for their host's answer (decision 162-2).
+    diag_pending: Mutex<HashMap<String, HostPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
     /// The signals taken from hosts (134-9, 144b).
@@ -1298,6 +1313,7 @@ impl AgentManager {
             jobs: Mutex::new(jobs::Jobs::default()),
             children: Mutex::new(HashMap::new()),
             new_workspaces: Mutex::new(HashMap::new()),
+            diag_pending: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
             signals: Mutex::new(attention::GATED_SIGNALS),
@@ -3375,6 +3391,72 @@ impl AgentManager {
         Ok(())
     }
 
+    /// One host's live diagnostics bundle (decision 162-2, the feedback API
+    /// contract's `gather_host_diags`): `diag` on its link, and its answer
+    /// within `timeout`. Never sent to a host that does not say `diag` — an
+    /// old host is never asked, and this returns the same error a timeout
+    /// would, so a caller gathering several hosts in parallel treats both as
+    /// `no_reply`.
+    pub async fn host_diag(
+        &self,
+        host_id: &str,
+        timeout: std::time::Duration,
+    ) -> AgentResult<storm_diag::Diag> {
+        let live = self.host_live(host_id);
+        if !live.online {
+            return Err(AgentError::HostOffline);
+        }
+        if !live.capabilities.as_ref().is_some_and(|c| c.diag) {
+            return Err(AgentError::NotFound("diag_unsupported"));
+        }
+        let request_id = crate::auth::identity::random_id("dgr_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.diag_pending.lock().unwrap().insert(
+            request_id.clone(),
+            HostPending {
+                host: host_id.to_string(),
+                done: tx,
+            },
+        );
+        let command = Command::Diag {
+            request_id: request_id.clone(),
+        };
+        let outcome = match self.send(host_id, command) {
+            Ok(()) => tokio::time::timeout(timeout, rx).await,
+            Err(e) => {
+                self.diag_pending.lock().unwrap().remove(&request_id);
+                return Err(e);
+            }
+        };
+        self.diag_pending.lock().unwrap().remove(&request_id);
+        match outcome {
+            Ok(Ok(Ok(value))) => {
+                serde_json::from_value(value).map_err(|e| AgentError::Internal(e.into()))
+            }
+            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => Err(AgentError::Timeout),
+        }
+    }
+
+    /// A host's answer to its own `diag` request, never another's. Late or
+    /// unknown request ids (the timeout already fired, or the id is not
+    /// this host's) are ignored, not an error that affects anything.
+    pub fn diag_answered(
+        &self,
+        host_id: &str,
+        request_id: &str,
+        diag: serde_json::Value,
+    ) -> AgentResult<()> {
+        let mut pending = self.diag_pending.lock().unwrap();
+        match pending.get(request_id) {
+            Some(p) if p.host == host_id => {}
+            _ => return Err(AgentError::NotFound("no such request")),
+        }
+        if let Some(p) = pending.remove(request_id) {
+            let _ = p.done.send(Ok(diag));
+        }
+        Ok(())
+    }
+
     /// Raw input. At most once: refused while the host is offline, never
     /// queued (freeze §11.3).
     pub fn input(&self, id: &str, bytes: &[u8]) -> AgentResult<()> {
@@ -3981,6 +4063,7 @@ mod tests {
                 .collect(),
             execution: None,
             typed_input: false,
+            diag: false,
         }
     }
 
