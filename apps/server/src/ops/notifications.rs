@@ -170,9 +170,19 @@ pub async fn unpause_notifications(state: &Shared, actor: &Actor) -> ApiResult<P
     state.agent.unpause_notifications().map_err(agent_error)
 }
 
-pub async fn send_test_notification(state: &Shared, actor: &Actor) -> ApiResult<Notification> {
+/// `device_id` is the calling device (161h item 4), so the test notice
+/// targets the device that asked for it rather than whichever active
+/// device's id happens to sort lowest.
+pub async fn send_test_notification(
+    state: &Shared,
+    actor: &Actor,
+    device_id: Option<&str>,
+) -> ApiResult<Notification> {
     crews_owner(actor)?;
-    state.agent.send_test_notification().map_err(agent_error)
+    state
+        .agent
+        .send_test_notification(device_id)
+        .map_err(agent_error)
 }
 
 // ---- Device prefs and presence (decision 161, slice 161-4) ---------------
