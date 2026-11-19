@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../agent/agent_state.dart' show sessionCredentialsProvider;
 import '../api/feedback_api.dart';
+import '../api/feedback_models.dart' show FeedbackStatus;
 import '../router.dart';
 import 'app_state.dart' show sessionClientProvider;
 
@@ -23,6 +24,21 @@ final feedbackApiFactoryProvider = Provider<FeedbackApi Function()?>((ref) {
 /// A [FeedbackApi] for the signed-in session, or null without one.
 FeedbackApi? feedbackApi(WidgetRef ref) =>
     ref.read(feedbackApiFactoryProvider)?.call();
+
+/// `GET /v1/feedback`: whether the sheet can send, for Settings › About &
+/// health's "Send problem reports" toggle — same shape as
+/// `serverConfigProvider`, so the toggle rebuilds once a `setEnabled` call
+/// is invalidated.
+final feedbackStatusProvider = FutureProvider<FeedbackStatus?>((ref) async {
+  final factory = ref.watch(feedbackApiFactoryProvider);
+  if (factory == null) return null;
+  final api = factory();
+  try {
+    return await api.status();
+  } finally {
+    api.dispose();
+  }
+});
 
 /// The current screen and the last [limit] action labels — route/screen
 /// changes and palette command ids, **never** a note title or path

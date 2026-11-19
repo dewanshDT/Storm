@@ -24,6 +24,8 @@ import 'package:storm/cache/cache_db.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/state/client_version.dart';
+import 'package:storm/state/feedback_state.dart'
+    show feedbackApiFactoryProvider;
 import 'package:storm/state/nav_memory.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/lan_servers.dart';
@@ -148,6 +150,10 @@ ProviderContainer shellContainer({
               ),
       ),
       claudeLoginApiFactoryProvider.overrideWithValue(null),
+      // No suite exercises the feedback toggle through the shell yet — null
+      // keeps it off the real connection, like `agentApiFactoryProvider`
+      // above.
+      feedbackApiFactoryProvider.overrideWithValue(null),
       terminalStreamFactoryProvider.overrideWithValue(
         terminalStream ?? (_, _, _) => StreamController<TerminalEvent>().stream,
       ),

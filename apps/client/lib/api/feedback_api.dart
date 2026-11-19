@@ -98,6 +98,20 @@ class FeedbackApi {
     return FeedbackSendResult.fromJson(json as Map<String, dynamic>);
   }
 
+  /// `PUT /v1/config/feedback` — turns reporting on or off for this server
+  /// (decision 162k). Persisted server-side, so it survives a restart —
+  /// the setting is the server's, not this device's, same shape as
+  /// `StormApi.setDiscoverable`.
+  Future<void> setEnabled(bool enabled) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/feedback'),
+        headers: _headers,
+        body: jsonEncode({'enabled': enabled}),
+      ),
+    );
+  }
+
   void dispose() => _client.close();
 }
 

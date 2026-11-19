@@ -11,9 +11,10 @@ GitHub account and no copying logs by hand.
 
 - **⌘K** (Ctrl+K), then **Report a problem**.
 - **Settings › About & health › Report a problem**.
-- **Report this** on an error snackbar (an agent that failed to start, a sync
-  error, a host that went offline) — this one opens with the failing action,
-  the screen and the error already filled in.
+- **Report this** on an error snackbar — on an error, such as an agent that
+  failed to resume, a sync notice about a recovered edit, or a host that
+  couldn't be removed — this one opens with the failing action, the screen
+  and the error already filled in.
 
 The sheet has:
 
@@ -50,12 +51,14 @@ the exact bytes a send would forward — because that is what a send
 
 - note content;
 - vault and note names;
-- tokens, keys and reply-email addresses other than the one you typed;
+- tokens and keys;
 - enrollment and pairing strings;
 - hostnames — your server's own name and each host's name, never a bare
   string a bundle could carry; a host in a bundle is "host-1", "host-2", and
   so on, never its name;
-- home paths, masked to `~/`.
+- home paths, masked to `~/`;
+- email addresses in logs, masked to `<email>` — the only email Storm ever
+  sends is the reply address you typed into the sheet yourself.
 
 LAN and public IP addresses are masked too (`<lan>`, `<ip>`), as is anything
 shaped like a token, a JWT, a `Bearer` header, or a `.md`/image path. Your
@@ -64,22 +67,23 @@ it before sending.
 
 ## Where it goes
 
-A send goes to your own server first. The server queues it durably (a report
-surviving a restart or a dead network) and retries delivery with backoff from
-1 second up to an hour, giving up after 7 days. From there it reaches the
-Storm project's own intake, where it is kept for up to 30 days unless it has
+Pressing Send needs your server to be reachable — that leg isn't queued, so
+the app must reach it to hand the report over. Once your server has it, the
+server queues it durably (a report surviving a restart or a dead network) and
+retries delivery to the intake with backoff from 1 second up to an hour,
+giving up after 7 days. From there it reaches the Storm project's own intake
+(the server's default), where it is kept for up to 30 days unless it has
 already been picked up and filed.
-
-Turning **Include diagnostics** off, or your server being offline when you
-press Send, changes none of this ordering — the report still queues on your
-server and sends once it can.
 
 Replies, if you leave an email, come back by email only.
 
-## Turning it off, or changing where reports go
+## Turning it off
 
-Feedback is on by default. A server operator can turn it off, or point it at
-another intake, with:
+Feedback is on by default. **Settings › About & health › Send problem
+reports** turns it off: with it off, the report sheet says reporting is
+turned off and refuses to send.
+
+Or, from a script:
 
 ```sh
 curl -X PUT http://127.0.0.1:8484/v1/config/feedback \
@@ -88,9 +92,10 @@ curl -X PUT http://127.0.0.1:8484/v1/config/feedback \
   -d '{"enabled": false}'
 ```
 
-`enabled: false` means nothing leaves your server: the sheet says so and Send
-is disabled. `intake_url` takes a report somewhere other than the Storm
-project's own intake (`https://feedback.storm.dev` by default):
+## Changing where reports go
+
+There's no Settings field for the intake address yet. A server operator can
+point it at another intake with the same endpoint:
 
 ```sh
 curl -X PUT http://127.0.0.1:8484/v1/config/feedback \
@@ -98,9 +103,6 @@ curl -X PUT http://127.0.0.1:8484/v1/config/feedback \
   -H "Content-Type: application/json" \
   -d '{"intake_url": "https://your-own-intake.example.com"}'
 ```
-
-There is no Settings page for either setting yet — this `PUT` (session tier,
-so any paired device's own token works) is the only way to change them today.
 
 ## From the command line
 

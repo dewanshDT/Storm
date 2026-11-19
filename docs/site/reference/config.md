@@ -72,10 +72,11 @@ integrations are ever offered to an agent.
 ## Feedback settings
 
 Not in a file — stored on the server and changed with `PUT
-/v1/config/feedback` (session tier; no Settings page for either yet). See
+/v1/config/feedback` (session tier). `enabled` also has a Settings page:
+**Settings › About & health › Send problem reports**. See
 [Report a problem](/docs/operate/reporting-problems/).
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | `false` stops every send: the report sheet says reporting is off and nothing reaches the intake. |
-| `intake_url` | `https://feedback.storm.dev` | Where a queued report is forwarded. An empty string reports as not configured (`intake_configured: false`) to the app. |
+| `intake_url` | the Storm project's intake (the server's default) | Where a queued report is forwarded. An empty string reports as not configured (`intake_configured: false`) to the app. No Settings field yet — change it with the `PUT` above. |
