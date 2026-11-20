@@ -54,7 +54,7 @@ echo "  git -C \"$repo_dir\" init -q -b apt-repo"
 echo "  git -C \"$repo_dir\" add -A"
 echo "  git -C \"$repo_dir\" -c user.name=you -c user.email=you@example.com \\"
 echo "    commit -q -m 'apt-repo: bootstrap from live Pages content'"
-echo "  git -C \"$repo_dir\" push <your-remote-url> apt-repo:apt-repo"
+echo "  git -C \"$repo_dir\" push --force <your-remote-url> apt-repo:apt-repo"
 echo
 echo "Then re-run the apt-repo workflow once (workflow_dispatch, channel=stable)"
 echo "to confirm it restores this branch and republishes Pages unchanged."

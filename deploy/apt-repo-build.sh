@@ -88,4 +88,10 @@ if [ "$channel" = stable ]; then
 	cp "$script_dir/install.ps1" "$repo_dir/install.ps1"
 fi
 
+# includedeb replaces a suite's existing entry for a package in place, but
+# leaves the superseded .deb's bytes sitting in pool/ unreferenced — without
+# this they accumulate forever. Safe every run: a no-op when nothing is
+# orphaned.
+reprepro -b "$repo_dir" deleteunreferenced
+
 echo "apt-repo-build: $channel release $new_version added to $repo_dir"
