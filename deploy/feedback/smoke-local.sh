@@ -44,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "--- starting the feedback Worker locally (wrangler dev, local R2+DO emulation) ---"
+echo "--- starting the feedback Worker locally (wrangler dev, local KV+DO emulation) ---"
 [ -x "$ROOT/apps/feedback-cf/node_modules/.bin/wrangler" ] ||
   (cd "$ROOT/apps/feedback-cf" && npm ci --no-audit --no-fund >/dev/null)
 WORKER_VARS="$WORK/worker-vars.env"

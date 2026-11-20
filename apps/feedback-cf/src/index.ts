@@ -20,10 +20,8 @@ import {
   deleteReport,
   getReport,
   getScreenshotBody,
-  hasScreenshot,
   listReportIds,
   lookupIdempotent,
-  purgeExpired,
   putReport,
   recordIdempotent,
 } from "./store";
@@ -60,10 +58,6 @@ export default {
     }
 
     return notFound();
-  },
-
-  async scheduled(event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    await purgeExpired(env, event.scheduledTime);
   },
 };
 
@@ -188,12 +182,12 @@ async function listReports(request: Request, env: Env, url: URL): Promise<Respon
     limit = Math.min(parsed, MAX_LIST_LIMIT);
   }
 
-  const ids = await listReportIds(env, limit);
+  const listed = await listReportIds(env, limit);
   const reports = [];
-  for (const id of ids) {
-    const report = await getReport(env, id);
+  for (const entry of listed) {
+    const report = await getReport(env, entry.id);
     if (!report) continue;
-    reports.push({ ...report, has_screenshot: await hasScreenshot(env, id) });
+    reports.push({ ...report, has_screenshot: entry.hasScreenshot });
   }
   return jsonResponse({ reports }, 200);
 }

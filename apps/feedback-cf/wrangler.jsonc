@@ -1,3 +1,16 @@
+// storm-feedback: decision 162's intake Worker. No account_id on purpose:
+// deploying is the operator's step, with their own account (DEPLOY.md).
+// Unlike storm-relay-cf, there is no `env` here to inherit a top-level
+// `routes`, so the custom domain is declared in this file rather than the
+// dashboard — nothing else can claim it on a later deploy.
+//
+// KV, not R2 (R2->KV switch, decision 162): Workers KV is free-plan, R2
+// isn't — R2 needs a payment method on the account even to stay within its
+// free tier. `id` below is this account's real `storm-feedback-reports`
+// namespace, from `wrangler kv namespace create storm-feedback-reports`
+// (DEPLOY.md has the command, for anyone setting this up fresh). No cron:
+// KV's own `expirationTtl` (src/store.ts) expires unsynced reports, so
+// there is nothing left for a scheduled purge to do.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "storm-feedback",
@@ -5,8 +18,11 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "preview_urls": false,
-  "r2_buckets": [
-    { "binding": "FEEDBACK", "bucket_name": "storm-feedback-reports" }
+  "routes": [
+    { "pattern": "storm-feedback.dewansh.space", "custom_domain": true }
+  ],
+  "kv_namespaces": [
+    { "binding": "REPORTS", "id": "6176f710496548039b7ef958d44c8494" }
   ],
   "durable_objects": {
     "bindings": [
@@ -15,8 +31,5 @@
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }
-  ],
-  "triggers": {
-    "crons": ["17 3 * * *"]
-  }
+  ]
 }

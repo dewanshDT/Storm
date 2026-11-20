@@ -1,10 +1,10 @@
-import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker from "../../src/index";
 import { newReportId } from "../../src/id";
 import type { StoredReport } from "../../src/report";
-import { putReport, reportKey, RETENTION_MS, screenshotKey } from "../../src/store";
-import { postReport, reportBody, uniqueInstallId } from "../harness";
+import { putReport, recordIdempotent, reportKey, RETENTION_MS, screenshotKey } from "../../src/store";
+
+const RETENTION_SECONDS = RETENTION_MS / 1000;
 
 async function seedAt(ms: number, text: string, withScreenshot = false): Promise<string> {
   const id = newReportId(ms);
@@ -22,60 +22,41 @@ async function seedAt(ms: number, text: string, withScreenshot = false): Promise
   return id;
 }
 
-describe("scheduled retention", () => {
-  it("purges a report and its screenshot past 30 days, keeps a recent one", async () => {
-    const now = Date.UTC(2026, 11, 1);
-    const expired = await seedAt(now - RETENTION_MS - 60_000, "too old", true);
-    const kept = await seedAt(now - RETENTION_MS + 60_000, "still within the window");
+// KV expires a key itself (`expirationTtl`), so there is no cron here to
+// exercise directly — these assert the TTL is actually set on every write
+// that used to rely on a daily purge job.
+describe("retention via KV expirationTtl (no cron — KV drops the key itself)", () => {
+  it("sets an expiration roughly RETENTION_MS from now on a report", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const id = await seedAt(Date.now(), "fresh");
 
-    const ctx = createExecutionContext();
-    await worker.scheduled(createScheduledController({ scheduledTime: now }), env, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(await env.FEEDBACK.head(reportKey(expired))).toBeNull();
-    expect(await env.FEEDBACK.head(screenshotKey(expired))).toBeNull();
-    expect(await env.FEEDBACK.head(reportKey(kept))).not.toBeNull();
+    const { keys } = await env.REPORTS.list({ prefix: reportKey(id) });
+    expect(keys).toHaveLength(1);
+    expect(keys[0].expiration).toBeDefined();
+    const ttl = (keys[0].expiration as number) - before;
+    expect(ttl).toBeGreaterThan(RETENTION_SECONDS - 60);
+    expect(ttl).toBeLessThanOrEqual(RETENTION_SECONDS + 60);
   });
 
-  it("leaves a report with no decodable time prefix alone rather than guessing", async () => {
-    await env.FEEDBACK.put("reports/not-a-real-id-xxxxxxxxxx/report.json", JSON.stringify({ weird: true }));
+  it("sets the same expiration on the screenshot key", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const id = await seedAt(Date.now(), "with a shot", true);
 
-    const ctx = createExecutionContext();
-    await worker.scheduled(createScheduledController(), env, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(await env.FEEDBACK.head("reports/not-a-real-id-xxxxxxxxxx/report.json")).not.toBeNull();
+    const { keys } = await env.REPORTS.list({ prefix: screenshotKey(id) });
+    expect(keys).toHaveLength(1);
+    const ttl = (keys[0].expiration as number) - before;
+    expect(ttl).toBeGreaterThan(RETENTION_SECONDS - 60);
+    expect(ttl).toBeLessThanOrEqual(RETENTION_SECONDS + 60);
   });
 
-  it("also purges idempotency markers past the same window, so a late resend starts fresh", async () => {
-    const installId = uniqueInstallId();
-    const first = await postReport(reportBody({ install_id: installId, report_id: "late-resend" }));
-    expect(first.status).toBe(201);
-    const firstId = ((await first.json()) as { id: string }).id;
+  it("sets an expiration on an idempotency marker too", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    await recordIdempotent(env, "11111111-2222-3333-4444-555555555555", "r-1", "some-id");
 
-    const future = Date.now() + RETENTION_MS + 24 * 60 * 60 * 1000;
-    const ctx = createExecutionContext();
-    await worker.scheduled(createScheduledController({ scheduledTime: future }), env, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(await env.FEEDBACK.head(reportKey(firstId))).toBeNull();
-
-    const resend = await postReport(reportBody({ install_id: installId, report_id: "late-resend" }));
-    expect(resend.status).toBe(201);
-    expect(((await resend.json()) as { id: string }).id).not.toBe(firstId);
-  });
-
-  it("leaves a recent idempotency marker alone — nothing to purge yet", async () => {
-    const installId = uniqueInstallId();
-    const first = await postReport(reportBody({ install_id: installId, report_id: "recent" }));
-    const firstId = ((await first.json()) as { id: string }).id;
-
-    const ctx = createExecutionContext();
-    await worker.scheduled(createScheduledController(), env, ctx);
-    await waitOnExecutionContext(ctx);
-
-    const resend = await postReport(reportBody({ install_id: installId, report_id: "recent" }));
-    expect(resend.status).toBe(200);
-    expect(((await resend.json()) as { id: string }).id).toBe(firstId);
+    const { keys } = await env.REPORTS.list({ prefix: "idempotency:11111111-2222-3333-4444-555555555555/" });
+    expect(keys).toHaveLength(1);
+    const ttl = (keys[0].expiration as number) - before;
+    expect(ttl).toBeGreaterThan(RETENTION_SECONDS - 60);
+    expect(ttl).toBeLessThanOrEqual(RETENTION_SECONDS + 60);
   });
 });

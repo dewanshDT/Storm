@@ -15169,6 +15169,46 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_intake_url_never_sends_and_stays_queued() {
+        let dir = tempdir::TempDir::new("storm-feedback-no-intake").unwrap();
+        let f = feedback_fixture(dir.path(), "").await;
+
+        let (status, body) = send(&f.app, get_with_auth("/v1/feedback", &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["intake_configured"], false,
+            "an explicitly cleared intake url is not configured"
+        );
+
+        let (_, prev) = preview(&f, "bug", false, client_info("x")).await;
+        let (status, sent) = submit(
+            &f,
+            serde_json::json!({"preview_id": prev["preview_id"], "kind": "bug", "text": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{sent}");
+
+        f.spawn_forwarder();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(
+            f.state.feedback.queue.len().await.unwrap(),
+            1,
+            "still queued with no intake configured"
+        );
+        let rows = f
+            .state
+            .feedback
+            .queue
+            .due("2030-01-01T00:00:00Z", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows[0].attempts, 0,
+            "never attempted a send against the empty url"
+        );
+    }
+
+    #[tokio::test]
     async fn disabled_feedback_sends_nothing() {
         let dir = tempdir::TempDir::new("storm-feedback-disabled").unwrap();
         let intake = fake_intake().await;

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { authorized } from "../../src/auth";
 import type { Env } from "../../src/env";
 
-const envWith = (token: string | undefined): Env => ({ FEEDBACK: {} as never, RATE_LIMITER: {} as never, SYNC_TOKEN: token });
+const envWith = (token: string | undefined): Env => ({ REPORTS: {} as never, RATE_LIMITER: {} as never, SYNC_TOKEN: token });
 
 function request(headers: Record<string, string> = {}): Request {
   return new Request("https://feedback.test/v1/reports", { headers });
