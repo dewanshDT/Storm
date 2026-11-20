@@ -370,6 +370,11 @@ struct Events {
     /// (colour-scheme reports) on, read from its output, regardless of
     /// `titles`/`program`.
     scheme_report: Mutex<SchemeReportObserver>,
+    /// 161-R1 fix 5: set by [`SessionEvents::draining`] once the reader has
+    /// reached EOF. `upload` holds off an interim post while this is set
+    /// and the session has not ended yet, so a notice parsed from the
+    /// final bytes is never split from the end report.
+    draining: AtomicBool,
 }
 
 /// A queued [`Notice`] with its per-session sequence number (161-R1 fix 2):
@@ -528,6 +533,7 @@ impl Events {
             notice_queue: NoticeQueue::default(),
             answered: Mutex::default(),
             scheme_report: Mutex::default(),
+            draining: AtomicBool::new(false),
         }
     }
 
@@ -608,6 +614,12 @@ impl Events {
     fn ack_notices(&self, sent: usize, dropped: u32) {
         self.notice_queue.ack(sent, dropped);
     }
+
+    /// 161-R1 fix 5: true once the reader has reached EOF for this session
+    /// and it has not formally ended yet — `ended` is imminent.
+    fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
 }
 
 /// A session's leader, and on an isolated host the uid it runs as: both
@@ -662,6 +674,11 @@ impl SessionEvents for Events {
     fn ended(&self, end: SessionEnd) {
         *self.ended.lock().unwrap() = Some(end);
         self.gone.send_replace(true);
+        self.wake.notify_one();
+    }
+
+    fn draining(&self) {
+        self.draining.store(true, Ordering::SeqCst);
         self.wake.notify_one();
     }
 
@@ -2838,7 +2855,18 @@ impl Host {
             let activity_changed = activity != *s.activity_sent.lock().unwrap();
             let program = s.events.program_report();
             let program_changed = program != *s.program_sent.lock().unwrap();
-            let (notices, notices_dropped) = s.events.pending_notices();
+            let (mut notices, mut notices_dropped) = s.events.pending_notices();
+            // 161-R1 fix 5: a notice queued on the session's very last
+            // output might still be in flight to the server when `ended`
+            // lands (the reader thread calls `output` before `draining`
+            // before `ended`, all in order, but can lose the CPU between
+            // any of them). A notice already visible while the reader is
+            // at EOF belongs to the end report, not this post, however
+            // this post was triggered.
+            if end.is_none() && s.events.is_draining() {
+                notices = Vec::new();
+                notices_dropped = 0;
+            }
             let notices_pending = !notices.is_empty() || notices_dropped > 0;
             let answered = s.events.answered_now();
             let answered_changed = answered != *s.answered_sent.lock().unwrap();
@@ -2940,7 +2968,15 @@ impl Host {
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
                         *s.activity_sent.lock().unwrap() = activity;
-                        s.events.ack_notices(notices.len(), notices_dropped);
+                        // 161-R1 fix 5: a fresh check, right before
+                        // dropping these from the queue — if the session
+                        // ended or started draining while this post was
+                        // in flight, leave them queued so the end report
+                        // (built from a fresh, unheld read) still carries
+                        // them rather than losing them to this post's ack.
+                        if s.events.ended.lock().unwrap().is_none() && !s.events.is_draining() {
+                            s.events.ack_notices(notices.len(), notices_dropped);
+                        }
                         status_retry_at = None;
                         retry = Duration::from_millis(250);
                     }
