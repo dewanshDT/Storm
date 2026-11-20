@@ -1,3 +1,8 @@
+// storm-feedback: decision 162's intake Worker. No account_id on purpose:
+// deploying is the operator's step, with their own account (DEPLOY.md).
+// Unlike storm-relay-cf, there is no `env` here to inherit a top-level
+// `routes`, so the custom domain is declared in this file rather than the
+// dashboard — nothing else can claim it on a later deploy.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "storm-feedback",
@@ -5,6 +10,9 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "preview_urls": false,
+  "routes": [
+    { "pattern": "storm-feedback.dewansh.space", "custom_domain": true }
+  ],
   "r2_buckets": [
     { "binding": "FEEDBACK", "bucket_name": "storm-feedback-reports" }
   ],

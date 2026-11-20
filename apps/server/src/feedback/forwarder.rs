@@ -116,6 +116,13 @@ async fn attempt(client: &reqwest::Client, intake_url: &str, body: &str) -> Outc
     }
 }
 
+// Both the off switch and an unconfigured intake (no override and no usable
+// default, or explicitly cleared to "") must hold a report queued rather
+// than hand `attempt` a URL nobody set.
+fn can_send(enabled: bool, intake_configured: bool) -> bool {
+    enabled && intake_configured
+}
+
 fn exponential_backoff(attempts: i64) -> Duration {
     let shift = attempts.clamp(1, 20) as u32 - 1;
     BASE_BACKOFF
@@ -164,11 +171,12 @@ pub async fn run(state: Shared) {
         if due.is_empty() {
             continue;
         }
-        let (intake_url, enabled) = {
+        let (intake_url, enabled, intake_configured) = {
             let vaults = state.vaults.read().await;
             (
                 vaults.registry.feedback_intake_url().to_string(),
                 vaults.registry.feedback_enabled(),
+                vaults.registry.feedback_intake_configured(),
             )
         };
         for row in due {
@@ -177,9 +185,9 @@ pub async fn run(state: Shared) {
                 let _ = state.feedback.queue.remove(&row.report_id).await;
                 continue;
             }
-            // Off means nothing leaves; the row stays queued and ages
-            // toward the 7-day cap regardless.
-            if !enabled {
+            // Off, or no intake url (cleared to ""), means nothing leaves;
+            // the row stays queued and ages toward the 7-day cap regardless.
+            if !can_send(enabled, intake_configured) {
                 continue;
             }
             match attempt(&client, &intake_url, &row.body).await {
@@ -218,6 +226,14 @@ pub async fn run(state: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unconfigured_intake_never_sends_even_when_enabled() {
+        assert!(!can_send(true, false), "cleared or unset intake url");
+        assert!(!can_send(false, true), "feedback turned off");
+        assert!(!can_send(false, false));
+        assert!(can_send(true, true));
+    }
 
     #[test]
     fn backoff_doubles_and_is_capped() {

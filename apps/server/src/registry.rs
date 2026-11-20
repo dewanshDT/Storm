@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 
 pub const REGISTRY_FILE: &str = "vaults.json";
 
-pub const DEFAULT_FEEDBACK_INTAKE_URL: &str = "https://feedback.storm.dev";
+pub const DEFAULT_FEEDBACK_INTAKE_URL: &str = "https://storm-feedback.dewansh.space";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultEntry {
@@ -1073,5 +1073,26 @@ mod tests {
         let f = fixture();
         fs::write(f.state.join(REGISTRY_FILE), "{ not json").unwrap();
         assert!(Registry::load(&f.state, &f.root).is_err());
+    }
+
+    #[test]
+    fn unset_is_configured_via_the_shipped_default_but_an_explicit_empty_url_is_not() {
+        let mut reg = Registry {
+            root: PathBuf::from("/tmp/does-not-matter"),
+            ..Default::default()
+        };
+        assert!(reg.feedback_intake_configured());
+        assert_eq!(reg.feedback_intake_url(), DEFAULT_FEEDBACK_INTAKE_URL);
+
+        reg.set_feedback_intake_url(String::new());
+        assert!(
+            !reg.feedback_intake_configured(),
+            "clearing the url turns configured off, not back to the default"
+        );
+        assert_eq!(reg.feedback_intake_url(), "");
+
+        reg.set_feedback_intake_url("https://example.com".into());
+        assert!(reg.feedback_intake_configured());
+        assert_eq!(reg.feedback_intake_url(), "https://example.com");
     }
 }
