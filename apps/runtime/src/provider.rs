@@ -207,6 +207,14 @@ pub trait SessionEvents: Send + Sync {
     /// A spawned child's own workspace, as the isolation helper made it
     /// before the child started (decision 137).
     fn child_workspace(&self, _made: crate::isolation::ChildWorkspace) {}
+    /// 161-R1 fix 5: the reader has reached EOF — every `output` call has
+    /// already been made, and `ended` is expected shortly (once the exit
+    /// code is known and stragglers are cleared). The host holds off on an
+    /// interim status post while this is true and the session has not
+    /// formally ended yet, so a notice queued on the last bytes is never
+    /// split from the end report by the reader thread losing the CPU
+    /// between this call and `ended`.
+    fn draining(&self) {}
 }
 
 /// Why a session could not be started.

@@ -412,6 +412,10 @@ impl Shared {
                 Err(_) => break,
             }
         }
+        // 161-R1 fix 5: every `output` call for this session has now
+        // happened; `ended` follows as soon as the exit code and
+        // stragglers are resolved below.
+        events.draining();
         let (lock, cvar) = &self.exit;
         let mut exit = lock.lock().unwrap();
         while exit.is_none() {
