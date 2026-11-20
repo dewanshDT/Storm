@@ -615,9 +615,12 @@ jobs:
           name: server-windows
           path: apps/server/dist/*
 
+  # Every Flutter app build gets `STORM_CHANNEL` stamped from the `channel`
+  # job (decision 163's app-channel slice), so a running app knows its own
+  # line and never recommends a host install from the other one.
   android:
     name: android (apk)
-    needs: check
+    needs: [check, channel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -649,7 +652,8 @@ jobs:
           flutter pub get
           flutter build apk --release \
             --build-name="${GITHUB_REF_NAME#v}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=${{ needs.channel.outputs.channel }}
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
             "dist/storm-${GITHUB_REF_NAME#v}.apk"
@@ -660,7 +664,7 @@ jobs:
 
   macos:
     name: macos (app)
-    needs: check
+    needs: [check, channel]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -675,7 +679,8 @@ jobs:
           flutter pub get
           flutter build macos --release \
             --build-name="${GITHUB_REF_NAME#v}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=${{ needs.channel.outputs.channel }}
           mkdir -p dist
           APP="build/macos/Build/Products/Release/Storm.app"
           test -d "$APP"
@@ -693,7 +698,7 @@ jobs:
   # install.ps1 and releases/latest/download always find it.
   app-windows:
     name: app (Windows x86_64)
-    needs: check
+    needs: [check, channel]
     runs-on: windows-latest
     defaults:
       run:
@@ -711,7 +716,8 @@ jobs:
           flutter pub get
           flutter build windows --release \
             --build-name="${GITHUB_REF_NAME#v}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=${{ needs.channel.outputs.channel }}
           tool/package_windows.sh dist/storm-app-windows-x86_64.zip "${GITHUB_REF_NAME}"
       - uses: actions/upload-artifact@v4
         with:
@@ -724,7 +730,7 @@ jobs:
   # supports, and refused if anything in the bundle needs newer.
   app-linux:
     name: app (Linux x86_64)
-    needs: check
+    needs: [check, channel]
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -742,7 +748,8 @@ jobs:
           flutter pub get
           flutter build linux --release \
             --build-name="${GITHUB_REF_NAME#v}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=${{ needs.channel.outputs.channel }}
           STORM_MAX_GLIBC=2.35 tool/package_linux.sh "${GITHUB_REF_NAME#v}" dist
       - uses: actions/upload-artifact@v4
         with:
@@ -751,7 +758,7 @@ jobs:
 
   web:
     name: web (zip)
-    needs: check
+    needs: [check, channel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -766,7 +773,8 @@ jobs:
           flutter pub get
           flutter build web --release \
             --build-name="${GITHUB_REF_NAME#v}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=${{ needs.channel.outputs.channel }}
           mkdir -p dist
           (cd build/web && zip -r "../../dist/storm-web-${GITHUB_REF_NAME#v}.zip" .)
       - uses: actions/upload-artifact@v4

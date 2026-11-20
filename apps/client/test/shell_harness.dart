@@ -75,6 +75,9 @@ ProviderContainer shellContainer({
   // stays the legacy, device-less install `router_test.dart` guards.
   String deviceId = '',
   String deviceSecret = '',
+  // The compiled default (`flutter test` passes no `--dart-define`), so a
+  // suite that wants the stable branch overrides this explicitly.
+  StormChannel channel = StormChannel.latest,
 }) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
@@ -126,6 +129,7 @@ ProviderContainer shellContainer({
       // Widget tests have no platform package info; keep Client settings
       // deterministic and free of MissingPluginException noise.
       clientVersionProvider.overrideWith((ref) async => '0.0.0-test'),
+      stormChannelProvider.overrideWithValue(channel),
       // Null without a client, rather than the default built from the fake
       // settings, so no suite can reach a real agent request by accident.
       agentApiFactoryProvider.overrideWithValue(

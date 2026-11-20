@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../state/client_version.dart';
 import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
 import '../ui/states.dart';
@@ -42,17 +44,26 @@ enum EnrollShape { you, service }
 /// logon task). As its own account: the `.deb` and systemd (decision 77e),
 /// Homebrew and a launchd LaunchDaemon (D14, AM35), the release zip and a
 /// Windows Service (D16, AM50).
+///
+/// Decision 163's app-channel slice: on a `latest` build, [channel] steers
+/// the Linux `install.sh` pipe and the Windows direct download at the
+/// release's own line, from [appVersion] (this app's own tag) where the
+/// command needs one — never Homebrew, which has no channel of its own yet.
+/// A stable build is unchanged.
 List<EnrollStep> enrollSteps(
   HostPlatform platform,
   EnrollShape shape,
+  StormChannel channel,
+  String appVersion,
 ) => switch ((platform, shape)) {
-  (HostPlatform.linux, EnrollShape.you) => const [
+  (HostPlatform.linux, EnrollShape.you) => [
     EnrollStep(
       'curl -fsSL https://dewanshdt.github.io/Storm/install.sh | '
-      'sh -s -- --yes --runtime --user',
+      'sh -s -- --yes --runtime --user'
+      '${channel == StormChannel.latest ? ' --channel latest' : ''}',
     ),
-    EnrollStep('~/.local/bin/storm-runtime enroll', pastesString: true),
-    EnrollStep('systemctl --user enable --now storm-runtime'),
+    const EnrollStep('~/.local/bin/storm-runtime enroll', pastesString: true),
+    const EnrollStep('systemctl --user enable --now storm-runtime'),
   ],
   (HostPlatform.linux, EnrollShape.service) => const [
     EnrollStep('sudo apt install storm-runtime'),
@@ -86,32 +97,46 @@ List<EnrollStep> enrollSteps(
   ],
   // In a PowerShell that is not elevated. `install --user` copies the binary
   // into %LOCALAPPDATA%; enrolling starts the logon task.
-  (HostPlatform.windows, EnrollShape.you) => const [
-    EnrollStep(_windowsDownload),
-    EnrollStep(
+  (HostPlatform.windows, EnrollShape.you) => [
+    windowsDownloadStep(channel, appVersion),
+    const EnrollStep(
       '& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install --user',
     ),
-    EnrollStep(
+    const EnrollStep(
       '& "\$env:LOCALAPPDATA\\StormRuntime\\bin\\storm-runtime.exe" enroll',
       pastesString: true,
     ),
   ],
   // In an elevated PowerShell. `install` copies the binary into Program
   // Files, so `enroll` runs from there; enrolling starts the service.
-  (HostPlatform.windows, EnrollShape.service) => const [
-    EnrollStep(_windowsDownload),
-    EnrollStep('& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install'),
-    EnrollStep(
+  (HostPlatform.windows, EnrollShape.service) => [
+    windowsDownloadStep(channel, appVersion),
+    const EnrollStep(
+      '& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install',
+    ),
+    const EnrollStep(
       '& "\$env:ProgramFiles\\StormRuntime\\storm-runtime.exe" enroll',
       pastesString: true,
     ),
   ],
 };
 
-const _windowsDownload =
-    'Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/'
+/// The Windows one-liner: `releases/latest/download` on a stable build, same
+/// as always — GitHub's own "Latest" never answers a `latest`-channel
+/// release (decision 163c). On a `latest` build it downloads this app's own
+/// tag's assets instead, since the app and its runtime are one release
+/// (decision 45); with no version yet known it falls back to
+/// `releases/latest`, same as stable, rather than build a broken tag URL.
+EnrollStep windowsDownloadStep(StormChannel channel, String appVersion) {
+  final base = channel == StormChannel.latest && appVersion.isNotEmpty
+      ? 'https://github.com/dewanshDT/Storm/releases/download/v$appVersion'
+      : 'https://github.com/dewanshDT/Storm/releases/latest/download';
+  return EnrollStep(
+    'Invoke-WebRequest $base/'
     'storm-runtime-windows-x86_64.zip -OutFile \$env:TEMP\\storm-runtime.zip; '
-    'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime';
+    'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime',
+  );
+}
 
 /// A shape's heading and what it means, in a line.
 (String, String) enrollShapeTitle(EnrollShape shape) => switch (shape) {
@@ -159,7 +184,7 @@ String enrollFootnote(HostPlatform platform, EnrollShape shape) => switch ((
 
 /// The enrollment string, shown once: it carries a single-use secret that
 /// nothing stores.
-class EnrollDialog extends StatefulWidget {
+class EnrollDialog extends ConsumerStatefulWidget {
   const EnrollDialog({
     super.key,
     required this.enrollment,
@@ -174,7 +199,7 @@ class EnrollDialog extends StatefulWidget {
   final String title;
 
   @override
-  State<EnrollDialog> createState() => _EnrollDialogState();
+  ConsumerState<EnrollDialog> createState() => _EnrollDialogState();
 }
 
 /// The enrollment string with its secret hidden: the scheme, then the last
@@ -187,7 +212,7 @@ String maskEnrollment(String s) {
   return '$head${'•' * 12}${s.substring(s.length - 4)}';
 }
 
-class _EnrollDialogState extends State<EnrollDialog> {
+class _EnrollDialogState extends ConsumerState<EnrollDialog> {
   bool _copied = false;
   bool _revealed = false;
   HostPlatform _platform = defaultHostPlatform();
@@ -198,6 +223,12 @@ class _EnrollDialogState extends State<EnrollDialog> {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final channel = ref.watch(stormChannelProvider);
+    // The release's own tag, stripped of a build number — `releases/download`
+    // for this app's own release (windowsDownloadStep's doc).
+    final appVersion = (ref.watch(clientVersionProvider).value ?? '').split(
+      '+',
+    )[0];
     final until = DateTime.tryParse(widget.expires)?.toLocal();
     final when = until == null
         ? 'soon'
@@ -280,6 +311,8 @@ class _EnrollDialogState extends State<EnrollDialog> {
                 for (final (i, step) in enrollSteps(
                   _platform,
                   shape,
+                  channel,
+                  appVersion,
                 ).indexed) ...[
                   Container(
                     key: Key('enroll-${shape.name}-command-$i'),

@@ -12,6 +12,7 @@ import '../controls.dart' show SettingsRow;
 import '../report_sheet.dart' show showReportProblemSheet;
 import '../shell/app_bar.dart' show healthColor;
 import '../tokens.dart';
+import '../widgets.dart' show KeyChip;
 import 'connection_page.dart' show serverAddress;
 import 'feedback_toggle.dart' show FeedbackToggleRow;
 import 'settings_widgets.dart';
@@ -32,6 +33,7 @@ class HealthPage extends ConsumerWidget {
     // be the server's (B-7).
     final serverVersion = ref.watch(serverConfigProvider).value?.version;
     final appVersion = ref.watch(clientVersionProvider).value;
+    final channel = ref.watch(stormChannelProvider);
 
     Future<void> syncNow() async {
       await ref.read(syncEngineProvider).sync();
@@ -84,18 +86,35 @@ class HealthPage extends ConsumerWidget {
         ),
         Padding(
           padding: EdgeInsets.only(top: t.sp * 2),
-          child: Text(
-            [
-              'App ${appVersion ?? '?'}',
-              if (serverVersion != null) 'Server $serverVersion',
-              serverAddress(settings.baseUrl),
-            ].join(' · '),
-            key: const Key('about-footer'),
-            style: TextStyle(
-              fontFamily: StormTokens.monoFamily,
-              fontSize: t.labelSize * 1.09,
-              color: t.text3,
-            ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  [
+                    'App ${appVersion ?? '?'}',
+                    if (serverVersion != null) 'Server $serverVersion',
+                    serverAddress(settings.baseUrl),
+                  ].join(' · '),
+                  key: const Key('about-footer'),
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize * 1.09,
+                    color: t.text3,
+                  ),
+                ),
+              ),
+              // Decision 163: nothing extra on a stable build — the public
+              // line is the assumed default, and only the other one needs
+              // calling out.
+              if (channel == StormChannel.latest) ...[
+                SizedBox(width: t.sp * 0.75),
+                const KeyChip(
+                  key: Key('about-channel-latest'),
+                  label: 'Latest',
+                ),
+              ],
+            ],
           ),
         ),
         const ThemeCredits(),

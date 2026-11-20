@@ -10,6 +10,7 @@ import 'package:storm/agent/oauth_links.dart';
 import 'package:storm/api/connection_log.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
+import 'package:storm/state/client_version.dart' show StormChannel;
 import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/pairing_screen.dart';
 import 'package:storm/ui/settings/settings_shell.dart';
@@ -1089,6 +1090,25 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'health');
       expect(find.textContaining('compatible'), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    // Decision 163's app-channel slice.
+    testWidgets('a latest build labels its version Latest', (tester) async {
+      final c = shellContainer(channel: StormChannel.latest);
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'health');
+      expect(find.byKey(const Key('about-channel-latest')), findsOneWidget);
+      expect(find.text('Latest'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a stable build shows no channel label', (tester) async {
+      final c = shellContainer(channel: StormChannel.stable);
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'health');
+      expect(find.byKey(const Key('about-channel-latest')), findsNothing);
+      expect(find.text('Latest'), findsNothing);
       await disposeShell(tester, c);
     });
   });
