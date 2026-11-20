@@ -46,10 +46,12 @@ enum EnrollShape { you, service }
 /// Windows Service (D16, AM50).
 ///
 /// Decision 163's app-channel slice: on a `latest` build, [channel] steers
-/// the Linux `install.sh` pipe and the Windows direct download at the
-/// release's own line, from [appVersion] (this app's own tag) where the
-/// command needs one — never Homebrew, which has no channel of its own yet.
-/// A stable build is unchanged.
+/// the Linux `install.sh` pipe, the Windows direct download (from
+/// [appVersion], this app's own tag, where the command needs one) and the
+/// Homebrew formula (`storm-runtime-latest`, `Formula/storm-runtime-latest.rb`
+/// — the two formulae `conflicts_with` each other, so only the install line
+/// names one; every other mac command names the installed binary, not the
+/// formula, and stays the same either way). A stable build is unchanged.
 List<EnrollStep> enrollSteps(
   HostPlatform platform,
   EnrollShape shape,
@@ -73,24 +75,28 @@ List<EnrollStep> enrollSteps(
     ),
     EnrollStep('sudo systemctl enable --now storm-runtime'),
   ],
-  (HostPlatform.macos, EnrollShape.you) => const [
-    EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
-    EnrollStep('brew install storm-runtime'),
-    EnrollStep('"\$(brew --prefix)/bin/storm-runtime" install --user'),
-    EnrollStep(
+  (HostPlatform.macos, EnrollShape.you) => [
+    const EnrollStep(
+      'brew tap dewanshdt/storm https://github.com/dewanshDT/Storm',
+    ),
+    EnrollStep(brewInstallFormula(channel)),
+    const EnrollStep('"\$(brew --prefix)/bin/storm-runtime" install --user'),
+    const EnrollStep(
       '"\$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" '
       'enroll',
       pastesString: true,
     ),
   ],
-  (HostPlatform.macos, EnrollShape.service) => const [
-    EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
-    EnrollStep('brew install storm-runtime'),
+  (HostPlatform.macos, EnrollShape.service) => [
+    const EnrollStep(
+      'brew tap dewanshdt/storm https://github.com/dewanshDT/Storm',
+    ),
+    EnrollStep(brewInstallFormula(channel)),
     // The full path: `sudo` need not search Homebrew's prefix.
-    EnrollStep('sudo "\$(brew --prefix)/bin/storm-runtime" install'),
+    const EnrollStep('sudo "\$(brew --prefix)/bin/storm-runtime" install'),
     // `cd /` first: the hidden account cannot read the operator's current
     // directory, and the command fails before asking for the string (B-4).
-    EnrollStep(
+    const EnrollStep(
       'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       pastesString: true,
     ),
@@ -120,6 +126,14 @@ List<EnrollStep> enrollSteps(
     ),
   ],
 };
+
+/// `brew install storm-runtime` on stable, `storm-runtime-latest` on latest
+/// (`Formula/storm-runtime-latest.rb`, decision 163): a separate formula,
+/// `conflicts_with "storm-runtime"`, since both provide the same
+/// `storm-runtime` binary — only this line ever names one or the other.
+String brewInstallFormula(StormChannel channel) =>
+    'brew install storm-runtime'
+    '${channel == StormChannel.latest ? '-latest' : ''}';
 
 /// The Windows one-liner: `releases/latest/download` on a stable build, same
 /// as always — GitHub's own "Latest" never answers a `latest`-channel

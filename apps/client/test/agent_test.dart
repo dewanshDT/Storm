@@ -1339,21 +1339,27 @@ void main() {
         windowsDownloadStep(StormChannel.latest, '').command,
         contains('releases/latest/download/storm-runtime-windows-x86_64'),
       );
-      // macOS has no channel of its own yet (Homebrew): unaffected.
-      expect(
-        enrollSteps(
+      // Homebrew has its own channel formula too (Formula/storm-runtime-latest.rb):
+      // only the install line names it; every other mac command names the
+      // installed binary, not the formula, so it is unaffected.
+      for (final shape in EnrollShape.values) {
+        final latestMac = enrollSteps(
           HostPlatform.macos,
-          EnrollShape.you,
+          shape,
           StormChannel.latest,
           '0.19.0',
-        ),
-        enrollSteps(
+        );
+        final stableMac = enrollSteps(
           HostPlatform.macos,
-          EnrollShape.you,
+          shape,
           StormChannel.stable,
           '0.19.0',
-        ),
-      );
+        );
+        expect(latestMac[1].command, 'brew install storm-runtime-latest');
+        expect(stableMac[1].command, 'brew install storm-runtime');
+        expect(latestMac[0], stableMac[0]);
+        expect(latestMac.sublist(2), stableMac.sublist(2));
+      }
     });
 
     test('each platform\'s steps are its own, with one enroll step', () {
