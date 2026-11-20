@@ -1,5 +1,6 @@
-// ULID-shaped: time prefix first, in Crockford base32, so R2's lexicographic
-// listing is oldest-first for free and the time can be decoded back out.
+// ULID-shaped: time prefix first, in Crockford base32, so KV's (and R2's,
+// before decision 162's switch) lexicographic listing is oldest-first for
+// free and the time can be decoded back out.
 const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const TIME_CHARS = 10;
 const RANDOM_CHARS = 16;

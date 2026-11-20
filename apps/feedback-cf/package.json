@@ -2,7 +2,7 @@
   "name": "storm-feedback-cf",
   "version": "0.1.0",
   "private": true,
-  "description": "Storm in-app feedback intake Worker: POST /v1/reports into R2 (decision 162d)",
+  "description": "Storm in-app feedback intake Worker: POST /v1/reports into Workers KV (decision 162d)",
   "license": "MIT",
   "type": "module",
   "scripts": {

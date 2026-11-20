@@ -25,13 +25,14 @@ async function seed(ms: number, text: string): Promise<string> {
 }
 
 describe("listing order", () => {
-  it("is oldest first, because ids are time-prefixed and R2 lists ascending", async () => {
+  it("is oldest first, because ids are time-prefixed and KV lists a prefix ascending", async () => {
     const base = Date.UTC(2026, 0, 1, 0, 0, 0);
     const oldest = await seed(base, "oldest");
     const middle = await seed(base + 1000, "middle");
     const newest = await seed(base + 2000, "newest");
 
-    const ids = await listReportIds(env, 50);
+    const listed = await listReportIds(env, 50);
+    const ids = listed.map((entry) => entry.id);
     const positions = [oldest, middle, newest].map((id) => ids.indexOf(id));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(positions.every((p) => p >= 0)).toBe(true);

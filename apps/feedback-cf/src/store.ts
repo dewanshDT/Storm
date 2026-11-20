@@ -1,71 +1,99 @@
 import type { Env } from "./env";
-import { isValidReportId, timeOfReportId } from "./id";
-import { log } from "./log";
+import { isValidReportId } from "./id";
 import type { StoredReport } from "./report";
 
-const REPORTS_PREFIX = "reports/";
+const REPORT_PREFIX = "report:";
+const SCREENSHOT_PREFIX = "shot:";
+const IDEMPOTENCY_PREFIX = "idempotency:";
 
 export function reportKey(id: string): string {
-  return `${REPORTS_PREFIX}${id}/report.json`;
+  return `${REPORT_PREFIX}${id}`;
 }
 
 export function screenshotKey(id: string): string {
-  return `${REPORTS_PREFIX}${id}/screenshot.png`;
+  return `${SCREENSHOT_PREFIX}${id}`;
+}
+
+// Unsynced reports are dropped after 30 days; the sync service deletes a
+// report as soon as it lands in the vault, so anything still here past the
+// cutoff was never synced. KV's own `expirationTtl` (set on every write
+// below) does the dropping — there is no cron job (decision 162, R2->KV).
+export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const RETENTION_SECONDS = RETENTION_MS / 1000;
+
+// What the list endpoint needs about a report without fetching its value.
+// `has_screenshot` is the one actually read back out (by `listReportIds`,
+// from the key's own `list()` page); the rest is for an operator poking at
+// `wrangler kv key list` without a GET per key.
+interface ReportMetadata {
+  created_at: string;
+  size: number;
+  kind: string;
+  has_screenshot: boolean;
 }
 
 export async function putReport(env: Env, report: StoredReport, screenshot: Uint8Array | undefined): Promise<void> {
-  await env.FEEDBACK.put(reportKey(report.id), JSON.stringify(report), {
-    httpMetadata: { contentType: "application/json" },
-  });
+  const body = JSON.stringify(report);
+  const metadata: ReportMetadata = {
+    created_at: report.received_at,
+    size: body.length,
+    kind: report.kind,
+    has_screenshot: screenshot !== undefined,
+  };
+  await env.REPORTS.put(reportKey(report.id), body, { expirationTtl: RETENTION_SECONDS, metadata });
   if (screenshot) {
-    await env.FEEDBACK.put(screenshotKey(report.id), screenshot, {
-      httpMetadata: { contentType: "image/png" },
+    await env.REPORTS.put(screenshotKey(report.id), screenshot, {
+      expirationTtl: RETENTION_SECONDS,
+      metadata: { contentType: "image/png" },
     });
   }
 }
 
 export async function getReport(env: Env, id: string): Promise<StoredReport | null> {
   if (!isValidReportId(id)) return null;
-  const obj = await env.FEEDBACK.get(reportKey(id));
-  if (!obj) return null;
-  return obj.json<StoredReport>();
-}
-
-export async function hasScreenshot(env: Env, id: string): Promise<boolean> {
-  return (await env.FEEDBACK.head(screenshotKey(id))) !== null;
+  return env.REPORTS.get<StoredReport>(reportKey(id), "json");
 }
 
 export async function getScreenshotBody(env: Env, id: string): Promise<ReadableStream | null> {
   if (!isValidReportId(id)) return null;
-  const obj = await env.FEEDBACK.get(screenshotKey(id));
-  return obj ? obj.body : null;
+  return env.REPORTS.get(screenshotKey(id), "stream");
 }
 
 export async function deleteReport(env: Env, id: string): Promise<boolean> {
   if (!isValidReportId(id)) return false;
-  const existing = await env.FEEDBACK.head(reportKey(id));
-  if (!existing) return false;
-  await env.FEEDBACK.delete([reportKey(id), screenshotKey(id)]);
+  const key = reportKey(id);
+  // A bounded `list()` on the exact key, not a `get()`: existence shouldn't
+  // cost a read of a report that can be up to 5 MB.
+  const probe = await env.REPORTS.list({ prefix: key, limit: 1 });
+  if (probe.keys.length === 0 || probe.keys[0].name !== key) return false;
+  await Promise.all([env.REPORTS.delete(key), env.REPORTS.delete(screenshotKey(id))]);
   return true;
 }
 
-// Oldest first for free: ids are time-prefixed and R2 lists a prefix in
-// ascending key order.
-export async function listReportIds(env: Env, limit: number): Promise<string[]> {
-  const ids: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await env.FEEDBACK.list({ prefix: REPORTS_PREFIX, delimiter: "/", cursor });
-    for (const prefix of page.delimitedPrefixes) {
-      ids.push(prefix.slice(REPORTS_PREFIX.length, -1));
-      if (ids.length >= limit) return ids;
-    }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
-  return ids;
+export interface ListedReport {
+  id: string;
+  hasScreenshot: boolean;
 }
 
-const IDEMPOTENCY_PREFIX = "idempotency/";
+// Oldest first for free: ids are time-prefixed and KV lists a prefix in
+// ascending key order, same as R2 did.
+export async function listReportIds(env: Env, limit: number): Promise<ListedReport[]> {
+  const entries: ListedReport[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.REPORTS.list<ReportMetadata>({
+      prefix: REPORT_PREFIX,
+      cursor,
+      limit: Math.min(1000, limit - entries.length),
+    });
+    for (const key of page.keys) {
+      entries.push({ id: key.name.slice(REPORT_PREFIX.length), hasScreenshot: key.metadata?.has_screenshot === true });
+      if (entries.length >= limit) return entries;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return entries;
+}
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -73,64 +101,21 @@ async function sha256Hex(text: string): Promise<string> {
 }
 
 // Hashed rather than used verbatim: report_id is arbitrary caller text and
-// must never become an unescaped R2 key segment.
+// must never become an unescaped KV key segment.
 async function idempotencyKey(installId: string, reportId: string): Promise<string> {
-  return `${IDEMPOTENCY_PREFIX}${installId}/${await sha256Hex(reportId)}.json`;
+  return `${IDEMPOTENCY_PREFIX}${installId}/${await sha256Hex(reportId)}`;
 }
 
 export async function lookupIdempotent(env: Env, installId: string, reportId: string): Promise<string | null> {
-  const obj = await env.FEEDBACK.get(await idempotencyKey(installId, reportId));
-  if (!obj) return null;
-  const data = await obj.json<{ id: string }>();
-  return data.id;
+  const data = await env.REPORTS.get<{ id: string }>(await idempotencyKey(installId, reportId), "json");
+  return data?.id ?? null;
 }
 
 export async function recordIdempotent(env: Env, installId: string, reportId: string, id: string): Promise<void> {
   const key = await idempotencyKey(installId, reportId);
-  await env.FEEDBACK.put(key, JSON.stringify({ id, created_at: new Date().toISOString() }));
-}
-
-// Unsynced reports are dropped after 30 days; the sync service deletes a
-// report as soon as it lands in the vault, so anything still here past the
-// cutoff was never synced.
-export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-
-export async function purgeExpired(env: Env, now: number = Date.now()): Promise<number> {
-  const cutoff = now - RETENTION_MS;
-  let cursor: string | undefined;
-  let deleted = 0;
-  do {
-    const page = await env.FEEDBACK.list({ prefix: REPORTS_PREFIX, delimiter: "/", cursor });
-    for (const prefix of page.delimitedPrefixes) {
-      const id = prefix.slice(REPORTS_PREFIX.length, -1);
-      const createdAt = timeOfReportId(id);
-      if (Number.isFinite(createdAt) && createdAt < cutoff) {
-        await env.FEEDBACK.delete([reportKey(id), screenshotKey(id)]);
-        deleted++;
-      }
-    }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
-  deleted += await purgeExpiredIdempotency(env, cutoff);
-  if (deleted > 0) log("retention_purged", { count: deleted });
-  return deleted;
-}
-
-// Without this an idempotency marker outlives every report it dedupes and
-// `idempotency/` grows forever. R2's own `uploaded` timestamp is used since
-// a marker has no id to decode a time from, and reading every body just to
-// find `created_at` would cost a GET per marker instead of one LIST.
-async function purgeExpiredIdempotency(env: Env, cutoff: number): Promise<number> {
-  let cursor: string | undefined;
-  let deleted = 0;
-  do {
-    const page = await env.FEEDBACK.list({ prefix: IDEMPOTENCY_PREFIX, cursor });
-    const stale = page.objects.filter((o) => o.uploaded.getTime() < cutoff).map((o) => o.key);
-    if (stale.length > 0) {
-      await env.FEEDBACK.delete(stale);
-      deleted += stale.length;
-    }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
-  return deleted;
+  // Same TTL as a report: once the report it dedupes has expired, there is
+  // nothing left to dedupe against.
+  await env.REPORTS.put(key, JSON.stringify({ id, created_at: new Date().toISOString() }), {
+    expirationTtl: RETENTION_SECONDS,
+  });
 }
