@@ -83,6 +83,18 @@ setup() {
   run parse_args --data
   [ "$status" -eq 2 ]
   [[ "$output" == *"--data needs a value"* ]]
+  run parse_args --channel beta
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--channel wants stable or latest"* ]]
+}
+
+@test "--channel: stable or latest, by flag or =value" {
+  parse_args
+  [ -z "$OPT_CHANNEL" ]
+  parse_args --channel latest
+  [ "$OPT_CHANNEL" = latest ]
+  parse_args --channel=stable
+  [ "$OPT_CHANNEL" = stable ]
 }
 
 @test "a port with a leading zero is still decimal" {

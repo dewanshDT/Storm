@@ -51,6 +51,40 @@ service keeps running that way when you re-run either installer.
 `dewanshdt.github.io/Storm` is Storm's **apt repository**, which also serves
 the installers. It is not this website.
 
+## Latest channel
+
+Storm ships two lines (decision 163). **Stable** (the default) is the public
+release, built off `main`. **Latest** tracks `staging` and is for an operator
+who wants what just landed before the next stable cut, and accepts the odd
+rough edge. Both are plain semver (stable v0.18.x, latest v0.19.x); switching
+is always an explicit choice, and re-running the installer as `upgrade` with
+no channel flag stays on whichever line is already installed.
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --channel latest
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Channel latest
+```
+
+By hand, **apt** (Linux): the installer's `--channel latest` writes the
+source with suite `latest` instead of `stable`; so does registering it
+yourself:
+
+```sh
+printf 'deb [signed-by=/usr/share/keyrings/storm.gpg] %s latest main\n' \
+  https://dewanshdt.github.io/Storm | sudo tee /etc/apt/sources.list.d/storm.list
+sudo apt update && sudo apt install storm-server
+```
+
+By hand, **Homebrew** (macOS, the Runtime Host): a second formula, since a
+Mac only ever runs one copy of `storm-runtime`.
+
+```sh
+brew install storm-runtime-latest   # conflicts with storm-runtime; pick one
+```
+
 ## Where things live
 
 | | Linux | macOS | Windows |
