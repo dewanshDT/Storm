@@ -19,6 +19,10 @@ on:
         type: choice
         options: [stable, latest]
         required: true
+      bootstrap:
+        description: "ONE-TIME ONLY: start the apt-repo branch empty if it does not exist yet. Normally this workflow refuses to start empty — see deploy/apt-repo-bootstrap.sh and deploy/README.md."
+        type: boolean
+        default: false
   # release.yml creates the GitHub Release with GITHUB_TOKEN, which does not
   # fire `release: published` for other workflows — call this job instead.
   workflow_call:
@@ -120,8 +124,14 @@ jobs:
             git fetch -q origin apt-repo
             git archive origin/apt-repo | tar -x -C apt-repo
             echo "restored apt-repo branch into apt-repo/"
+          elif [ "${{ inputs.bootstrap }}" = "true" ]; then
+            # workflow_dispatch's explicit escape hatch only — starting empty
+            # any other way would deploy a Pages site holding only this run's
+            # release and silently wipe every other release out of `stable`.
+            echo "::warning::no apt-repo branch — bootstrap=true, starting empty. This must be the one-time bootstrap, or every other release just got dropped from Pages."
           else
-            echo "::warning::no apt-repo branch yet — starting empty. See deploy/README.md 'Apt repository (stable + latest)' for the one-time bootstrap."
+            echo "::error::no apt-repo branch to restore. Refusing to start empty — that would deploy a Pages site with only $TAG and wipe the rest of stable, the exact thing decision 163e's cumulative repo prevents. Run deploy/apt-repo-bootstrap.sh once (see deploy/README.md 'Apt repository (stable + latest)'), or re-dispatch this workflow with bootstrap=true only if you are certain there is nothing to preserve." >&2
+            exit 1
           fi
       - name: Build repo
         run: |
@@ -134,24 +144,24 @@ jobs:
         run: |
           # A throwaway clone, never the main checkout's branch — a failure
           # above this step never reaches here, so the branch is untouched.
+          #
+          # A single orphan commit, force-pushed, every run — never
+          # incremental history. pool/ holds every live .deb (tens of MB a
+          # release); keeping every old commit would keep every superseded
+          # .deb in git forever even though apt-repo-build.sh already drops
+          # them from the working tree (deleteunreferenced). Only the current
+          # snapshot's content matters here, so there is nothing to diff
+          # against a previous commit, and nothing lost by discarding the
+          # branch's own git history on every run.
           push_dir=$(mktemp -d)
           git -C "$push_dir" init -q
-          git -C "$push_dir" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git -C "$push_dir" fetch -q origin apt-repo; then
-            git -C "$push_dir" checkout -q -B apt-repo origin/apt-repo
-            find "$push_dir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          else
-            git -C "$push_dir" checkout -q --orphan apt-repo
-          fi
+          git -C "$push_dir" checkout -q --orphan apt-repo
           cp -a apt-repo/. "$push_dir/"
           git -C "$push_dir" -c user.name="storm-bot" -c user.email="storm-bot@users.noreply.github.com" add -A
-          if git -C "$push_dir" diff --cached --quiet; then
-            echo "apt-repo branch unchanged"
-          else
-            git -C "$push_dir" -c user.name="storm-bot" -c user.email="storm-bot@users.noreply.github.com" \
-              commit -q -m "apt-repo: $CHANNEL $TAG"
-            git -C "$push_dir" push -q origin apt-repo
-          fi
+          git -C "$push_dir" -c user.name="storm-bot" -c user.email="storm-bot@users.noreply.github.com" \
+            commit -q -m "apt-repo: $CHANNEL $TAG"
+          git -C "$push_dir" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$push_dir" push -q --force origin apt-repo
           rm -rf "$push_dir"
       - name: Prepare the Pages directory
         run: |

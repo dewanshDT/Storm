@@ -1,8 +1,18 @@
 #!/bin/sh
 # Decision 163c: the channel of a tag is decided ONCE, by ancestry, and only
 # here — every workflow and check calls this instead of re-deriving the
-# answer. `stable` if the tag's commit is reachable from origin/main (it was
-# promoted there, decision 72), else `latest`.
+# answer. `stable` if the tag's commit is on origin/main's FIRST-PARENT
+# chain, else `latest`.
+#
+# First-parent, not plain reachability: decision 72's promotion merges
+# `staging` into `main`, and after that merge, plain `merge-base
+# --is-ancestor` would call every earlier `latest` tag `stable` too — they
+# are reachable from main's tip via the merge commit's *second* parent. A
+# stable tag only ever sits on main's own line (a merge commit's first
+# parent, or an ordinary commit made directly on main); a promoted commit's
+# tag stays whatever channel it already was. Re-deriving this with plain
+# ancestry after a promotion would call a pre-promotion latest tag stable on
+# a rerun, and the apt workflow_dispatch fallback could mark it GitHub Latest.
 set -eu
 
 tag="${1:-}"
@@ -28,7 +38,8 @@ else
 	exit 1
 fi
 
-if git merge-base --is-ancestor "$tag" "$main_ref"; then
+commit=$(git rev-parse "${tag}^{commit}")
+if git rev-list --first-parent "$main_ref" | grep -qx "$commit"; then
 	echo stable
 else
 	echo latest

@@ -407,12 +407,37 @@ is missing `conf`/`db` entirely since `publish/` strips them) or from the
 previous `upload-pages-artifact` artifact (which GitHub Actions can expire
 and does not diff or roll back).
 
+**The branch is one orphan commit, force-pushed every run — never
+incremental history.** `pool/` holds every live `.deb` (tens of MB a
+release); keeping every run's commit would keep every superseded `.deb` in
+git forever. `deploy/apt-repo-build.sh` also runs `reprepro deleteunreferenced`
+after every `includedeb`, so a suite's old version is dropped from `pool/`
+itself once nothing references it any more, not just from git's history of
+the branch — reprepro's own replace-on-`includedeb` does **not** do this by
+itself (confirmed by `tools/apt-repo-build-test.sh`, which fails without the
+explicit `deleteunreferenced` call). Net effect: the tree stays close to one
+release's worth of `.deb`s per suite, not a growing pile.
+
+**The workflow refuses to start the apt-repo branch empty.** If it is
+missing, every normal trigger (a real release, the `release: published`
+event) fails outright rather than silently deploying a Pages site holding
+only that one release — the exact thing this cumulative repo exists to
+prevent. The only way around that is `workflow_dispatch`'s explicit
+`bootstrap: true` input, meant for the one-time bootstrap below (or for
+re-doing it if the branch is ever lost).
+
 **One-time bootstrap**, before the first `latest` release — today's Pages
-site has only `stable` (v0.18.0): a human with push access runs
-`deploy/apt-repo-bootstrap.sh <keyid>`, which mirrors the live site, rebuilds
-reprepro state for it under both codenames, and prints the `git push` that
-makes it the `apt-repo` branch. The script does this locally; it never runs
-in CI. See its header for the exact steps.
+site has only `stable` (v0.18.0). Run **once**, by a human with push access:
+
+```sh
+deploy/apt-repo-bootstrap.sh <keyid>   # <keyid> is the key deploy/storm-archive-keyring.gpg was exported from
+```
+
+This mirrors the live site, rebuilds reprepro state for it under both
+codenames, and prints the exact `git push` that makes the result the
+`apt-repo` branch — run locally, never in CI. Once that branch exists, the
+workflow finds it on its own; `bootstrap: true` is not needed again unless
+the branch is deleted.
 
 ## MCP clients: `storm-runtime mcp-connect`
 

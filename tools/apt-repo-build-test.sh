@@ -81,6 +81,10 @@ version_in() {
 installer_is() {
 	grep -q "$1" "$repo_dir/install.sh"
 }
+# shellcheck disable=SC2329
+pool_has() {
+	find "$repo_dir/pool" -name "storm-server_$1*" 2>/dev/null | grep -q .
+}
 
 # 1. A stable release: v0.18.0.
 deb_dir="$work/debs-1"
@@ -121,5 +125,15 @@ check_not "stable never gained latest's 0.19.0" version_in stable 0.19.0-1
 check "latest kept its newer 0.19.0" version_in latest 0.19.0-1
 check_not "latest was not downgraded to 0.18.1" version_in latest 0.18.1-1
 check "Pages install.sh was refreshed by the stable fix" installer_is "stable install.sh fixture"
+
+# 0.18.0 is now superseded in BOTH suites (stable moved to 0.18.1 just above,
+# latest moved to 0.19.0 in step 2) — reprepro's own replace-on-includedeb
+# does not delete the orphaned .deb from pool/ by itself (confirmed by this
+# assertion failing without the `deleteunreferenced` call in
+# apt-repo-build.sh); explicitly running it is what keeps pool/ from growing
+# by a full .deb every single release forever.
+check_not "pool/ no longer holds the fully-superseded 0.18.0 .deb (deleteunreferenced)" pool_has 0.18.0-1
+check "pool/ still holds stable's current 0.18.1" pool_has 0.18.1-1
+check "pool/ still holds latest's current 0.19.0" pool_has 0.19.0-1
 
 exit "$fail"
