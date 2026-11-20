@@ -31,6 +31,8 @@ Package: storm-server
 Version: $version
 Architecture: amd64
 Maintainer: Storm <test@example.com>
+Section: utils
+Priority: optional
 Description: fixture for apt-repo-build-test
 EOF
 	dpkg-deb --build --root-owner-group "$pkg_dir" "$out" >/dev/null
