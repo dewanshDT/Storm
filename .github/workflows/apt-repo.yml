@@ -1,21 +1,39 @@
 name: Apt repository
 
-# Rebuild the Pages-hosted apt repo from GitHub Release .deb assets whenever a
-# release is published (or manually). Pages serves the uploaded directory as
-# the site root, so the apt line is:
+# Add a release's .deb assets to the cumulative apt repo on Pages (decision
+# 163e: two suites, `stable` and `latest`, never rebuilt from one release).
+# Pages serves the uploaded directory as the site root, so the apt lines are:
 #   deb [signed-by=/usr/share/keyrings/storm.gpg] https://<user>.github.io/Storm stable main
-# not .../Storm/apt.
+#   deb [signed-by=/usr/share/keyrings/storm.gpg] https://<user>.github.io/Storm latest main
+# not .../Storm/apt. The reprepro base (conf/, db/, dists/, pool/) lives
+# between runs in the `apt-repo` branch — see deploy/README.md "Apt
+# repository (stable + latest)" for the mechanism and its one-time bootstrap.
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Republish the newest release of this channel (never 'the newest release' overall, decision 163e)"
+        type: choice
+        options: [stable, latest]
+        required: true
+      bootstrap:
+        description: "ONE-TIME ONLY: start the apt-repo branch empty if it does not exist yet. Normally this workflow refuses to start empty — see deploy/apt-repo-bootstrap.sh and deploy/README.md."
+        type: boolean
+        default: false
   # release.yml creates the GitHub Release with GITHUB_TOKEN, which does not
   # fire `release: published` for other workflows — call this job instead.
   workflow_call:
+    inputs:
+      tag:
+        description: "The tag that was just released"
+        type: string
+        required: true
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -32,6 +50,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install apt tooling
         run: |
           sudo apt-get update
@@ -60,47 +80,96 @@ jobs:
           KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
           echo "KEYID=$KEYID" >> "$GITHUB_ENV"
           echo "Imported key $KEYID"
+      - name: Resolve the tag and its channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          if [ -z "$TAG" ]; then
+            # workflow_dispatch fallback: the newest release of the chosen
+            # channel, never just the newest release (163e).
+            CHOSEN="${{ inputs.channel }}"
+            if [ "$CHOSEN" = stable ]; then
+              TAG=$(gh release list --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName')
+            else
+              TAG=$(gh release list --limit 50 --json tagName,isPrerelease \
+                -q '[.[] | select(.isPrerelease)][0].tagName')
+            fi
+          fi
+          if [ -z "$TAG" ]; then
+            echo "apt-repo: could not resolve a tag to publish" >&2
+            exit 1
+          fi
+          git fetch origin main
+          CHANNEL=$(tools/release-channel.sh "$TAG")
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+          echo "resolved $TAG as $CHANNEL"
       - name: Download release debs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p incoming
-          # contents: read is required — an explicit permissions block without
-          # it makes gh release download 404.
-          TAG="${{ github.event.release.tag_name }}"
-          if [ -z "$TAG" ]; then
-            TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
-          fi
+          # contents permission is required — a job without it makes
+          # `gh release download` 404.
           gh release download "$TAG" --pattern '*.deb' --dir incoming
           ls -la incoming
+      - name: Restore apt repo state from the apt-repo branch
+        run: |
+          mkdir -p apt-repo
+          if git ls-remote --exit-code --heads origin apt-repo >/dev/null 2>&1; then
+            git fetch -q origin apt-repo
+            git archive origin/apt-repo | tar -x -C apt-repo
+            echo "restored apt-repo branch into apt-repo/"
+          elif [ "${{ inputs.bootstrap }}" = "true" ]; then
+            # workflow_dispatch's explicit escape hatch only — starting empty
+            # any other way would deploy a Pages site holding only this run's
+            # release and silently wipe every other release out of `stable`.
+            echo "::warning::no apt-repo branch — bootstrap=true, starting empty. This must be the one-time bootstrap, or every other release just got dropped from Pages."
+          else
+            echo "::error::no apt-repo branch to restore. Refusing to start empty — that would deploy a Pages site with only $TAG and wipe the rest of stable, the exact thing decision 163e's cumulative repo prevents. Run deploy/apt-repo-bootstrap.sh once (see deploy/README.md 'Apt repository (stable + latest)'), or re-dispatch this workflow with bootstrap=true only if you are certain there is nothing to preserve." >&2
+            exit 1
+          fi
       - name: Build repo
         run: |
-          mkdir -p apt-repo/conf
-          cat > apt-repo/conf/distributions <<EOF
-          Origin: Storm
-          Label: Storm
-          Codename: stable
-          Architectures: amd64
-          Components: main
-          Description: Storm server apt repository
-          SignWith: ${KEYID}
-          EOF
+          STORM_APT_KEYID="$KEYID" deploy/apt-repo-build.sh "$CHANNEL" incoming apt-repo
           gpg --armor --export "$KEYID" > apt-repo/storm-archive-keyring.asc
           gpg --export "$KEYID" > apt-repo/storm-archive-keyring.gpg
-          for deb in incoming/*.deb; do
-            reprepro -b apt-repo includedeb stable "$deb"
-          done
+      - name: Persist repo state to the apt-repo branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A throwaway clone, never the main checkout's branch — a failure
+          # above this step never reaches here, so the branch is untouched.
+          #
+          # A single orphan commit, force-pushed, every run — never
+          # incremental history. pool/ holds every live .deb (tens of MB a
+          # release); keeping every old commit would keep every superseded
+          # .deb in git forever even though apt-repo-build.sh already drops
+          # them from the working tree (deleteunreferenced). Only the current
+          # snapshot's content matters here, so there is nothing to diff
+          # against a previous commit, and nothing lost by discarding the
+          # branch's own git history on every run.
+          push_dir=$(mktemp -d)
+          git -C "$push_dir" init -q
+          git -C "$push_dir" checkout -q --orphan apt-repo
+          cp -a apt-repo/. "$push_dir/"
+          git -C "$push_dir" -c user.name="storm-bot" -c user.email="storm-bot@users.noreply.github.com" add -A
+          git -C "$push_dir" -c user.name="storm-bot" -c user.email="storm-bot@users.noreply.github.com" \
+            commit -q -m "apt-repo: $CHANNEL $TAG"
+          git -C "$push_dir" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$push_dir" push -q --force origin apt-repo
+          rm -rf "$push_dir"
+      - name: Prepare the Pages directory
+        run: |
           mkdir -p publish
           cp -a apt-repo/. publish/
-          # Keep the keyring at the site root; drop reprepro internals.
+          # Keep the keyring and (on a stable run) the installers at the site
+          # root; drop reprepro's own internals.
           rm -rf publish/conf publish/db
-          # Bootstrap installer (Tailscale-style one-liner). Source of truth:
-          # deploy/install.sh — republished with every apt Pages build.
-          cp deploy/install.sh publish/install.sh
-          chmod 0644 publish/install.sh
-          # Its Windows counterpart (decision 99), served beside it.
-          cp deploy/install.ps1 publish/install.ps1
-          chmod 0644 publish/install.ps1
           ls -laR publish
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
