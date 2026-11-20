@@ -64,7 +64,10 @@
   Remove the Storm app and its shortcut. Its cache and sign-in stay in your
   profile.
 .PARAMETER Version
-  A release tag such as v0.8.0. Default: the latest release.
+  A release tag such as v0.8.0. Default: the latest release in -Channel.
+.PARAMETER Channel
+  stable (default): the latest release, same as always. latest: the newest
+  release by semver, pre-releases included (decision 163).
 .PARAMETER FromDir
   Take the zips and checksums.txt from this folder instead of downloading them.
 .PARAMETER Workspace
@@ -89,6 +92,8 @@ param(
     [switch]$App,
     [switch]$RemoveApp,
     [string]$Version,
+    [ValidateSet('stable', 'latest')]
+    [string]$Channel = 'stable',
     [string]$FromDir,
     [string]$Workspace,
     [switch]$PasswordStdin,
@@ -217,8 +222,35 @@ if ($Runtime -and -not $User -and -not $admin) {
     Fail "the Runtime Host runs as the StormRuntime service here ($serviceWhy): run this in PowerShell as administrator"
 }
 
+# A release tag's semver as one comparable number; $null for anything that
+# isn't major.minor.patch (a suffix after - or + is ignored, like ver_key in
+# install.sh).
+function Get-SemVerKey([string]$tag) {
+    $core = $tag.TrimStart('v').Split(@('-', '+'), 2)[0].Split('.')
+    if ($core.Count -lt 3) { return $null }
+    try {
+        [int64]$core[0] * 100000000 + [int64]$core[1] * 10000 + [int64]$core[2]
+    } catch {
+        $null
+    }
+}
+
 if (-not $Version -and -not $FromDir) {
-    $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name
+    if ($Channel -eq 'latest') {
+        # The newest release by semver, pre-releases included (decision 163):
+        # /releases/latest only ever answers the stable line.
+        $releases = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=30"
+        $best = $null
+        $bestKey = -1
+        foreach ($r in $releases) {
+            $key = Get-SemVerKey $r.tag_name
+            if ($null -ne $key -and $key -gt $bestKey) { $bestKey = $key; $best = $r.tag_name }
+        }
+        if (-not $best) { Fail 'no release on the latest channel had a plain semver tag; pass -Version vX.Y.Z' }
+        $Version = $best
+    } else {
+        $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name
+    }
 }
 
 $serverBin = Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-server.exe'
@@ -235,7 +267,7 @@ $mcpDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm'
 $userRuntimeBin = Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe'
 $mcpViaHost = $Mcp -and (($Runtime -and $User) -or (-not $Runtime -and $userHost))
 
-Step "Plan ($(if ($Version) { $Version } else { "from $FromDir" }))"
+Step "Plan ($(if ($Version) { $Version } else { "from $FromDir" })$(if ($Channel -eq 'latest') { ', latest channel' }))"
 if ($Server) {
     Say "  server   : $ServerZip, checked; storm-server up as $env:USERNAME (logon task, notes in $env:USERPROFILE\Storm)"
     Say "  firewall : asks; inbound TCP $Port for storm-serverw.exe, Private networks only $(if (-not $admin) { '(needs administrator: printed instead)' })"

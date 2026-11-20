@@ -20,7 +20,10 @@
 #
 # Env:
 #   STORM_APT_ROOT  apt/Pages root (default: https://dewanshdt.github.io/Storm)
-#   STORM_CHANNEL   apt suite (default: stable)
+#   STORM_CHANNEL   stable or latest (default: stable); --channel overrides it.
+#                   Decides the apt suite and, with no --version, which
+#                   release is installed: stable from releases/latest, latest
+#                   the newest by semver, pre-releases included (decision 163).
 #   NO_COLOR        plain output
 
 storm_installer_body() {
@@ -38,6 +41,9 @@ fi
 
 STORM_REPO_URL="https://github.com/dewanshDT/Storm"
 STORM_LATEST_API="https://api.github.com/repos/dewanshDT/Storm/releases/latest"
+# The latest channel's source: every recent release, pre-releases included
+# (decision 163). /releases/latest only ever answers the stable line.
+STORM_RELEASES_API="https://api.github.com/repos/dewanshDT/Storm/releases?per_page=30"
 STORM_INSTALL_URL="https://dewanshdt.github.io/Storm/install.sh"
 STORM_DEFAULT_PORT=8484
 # The registry. Its order is the checklist's and the plan's.
@@ -94,7 +100,11 @@ Components:
 Options:
   --yes                don't ask: use the flags and the defaults
   --dry-run            print the plan and change nothing
-  --version vX.Y.Z     install this release (default: the latest)
+  --version vX.Y.Z     install this release (default: the latest in --channel)
+  --channel stable|latest
+                       stable: the public line (default). latest: the newest
+                       release by semver, pre-releases included. upgrade
+                       with no --channel stays on the one already installed
   --data DIR           server data folder (default: ~/Storm on macOS, /srv/storm on Linux)
   --port N             server port (default: $STORM_DEFAULT_PORT)
   --addr HOST:PORT     the address phones and other machines use to reach the server
@@ -133,7 +143,7 @@ args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
   OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0 OPT_SERVICE=0 RT_SHAPE_ASKED=0
-  OPT_HELP=0 SUBCOMMAND=install
+  OPT_HELP=0 OPT_CHANNEL="" SUBCOMMAND=install
 }
 
 preset_components() {
@@ -217,6 +227,15 @@ set_opt() {
       fi
       OPT_WORKSPACE=$2
       ;;
+    --channel)
+      case "$2" in
+        stable | latest) OPT_CHANNEL=$2 ;;
+        *)
+          arg_error "--channel wants stable or latest, not '$2'"
+          return 2
+          ;;
+      esac
+      ;;
   esac
   return 0
 }
@@ -228,7 +247,7 @@ parse_args() {
     case "$1" in
       -y | --yes) OPT_YES=1 ;;
       --dry-run) OPT_DRY_RUN=1 ;;
-      --version | --data | --port | --addr | --from-dir | --workspace)
+      --version | --data | --port | --addr | --from-dir | --workspace | --channel)
         if [ $# -lt 2 ]; then
           arg_error "$1 needs a value"
           return 2
@@ -236,7 +255,7 @@ parse_args() {
         set_opt "$1" "$2" || return 2
         shift
         ;;
-      --version=* | --data=* | --port=* | --addr=* | --from-dir=* | --workspace=*)
+      --version=* | --data=* | --port=* | --addr=* | --from-dir=* | --workspace=* | --channel=*)
         set_opt "${1%%=*}" "${1#*=}" || return 2
         ;;
       --server | --runtime | --mcp | --app | --mobile | --agents) add_component "${1#--}" ;;
@@ -368,7 +387,7 @@ set_paths() {
   MY_UID=$(id -u)
   APT_ROOT=${STORM_APT_ROOT:-https://dewanshdt.github.io/Storm}
   APT_ROOT=${APT_ROOT%/}
-  CHANNEL=${STORM_CHANNEL:-stable}
+  CHANNEL=${OPT_CHANNEL:-${STORM_CHANNEL:-stable}}
   KEYRING_URL="$APT_ROOT/storm-archive-keyring.gpg"
   case "$OS" in
     macos)
@@ -468,6 +487,58 @@ set_paths() {
   # MCP only: a plain copy where a GUI app's PATH and a shell's both look.
   MCP_BIN="$root/usr/local/bin/storm-runtime"
   LOG_PATH=$LOG_FILE
+  # Where the apt source line (Linux) doesn't exist to read the channel back
+  # from -- macOS, or a Linux host with no apt repo added -- this is it.
+  CHANNEL_MARKER="$(dirname "$LOG_FILE")/channel"
+  # Staying on the installed channel is the default; switching is an
+  # explicit --channel. Covers `upgrade` and the interactive upgrade menu
+  # inside a plain `install` run alike -- both offer "upgrade to $want",
+  # and $want must be the newest release *in this install's channel*.
+  # CHANNEL_SWITCH says choose_mode must act even where plain semver alone
+  # wouldn't: latest is always ahead of stable (decision 163), so switching
+  # back to stable is a "downgrade" by the numbers, not by intent.
+  CHANNEL_SWITCH=0
+  local installed_channel
+  if installed_channel=$(detect_installed_channel); then
+    if [ -z "$OPT_CHANNEL" ]; then
+      CHANNEL=$installed_channel
+    elif [ "$OPT_CHANNEL" != "$installed_channel" ]; then
+      CHANNEL_SWITCH=1
+    fi
+  fi
+}
+
+# The channel (stable|latest) an install is already on: the apt source
+# line's suite (Linux), else the marker set_paths names above. Empty when
+# neither says.
+detect_installed_channel() {
+  local chan
+  if [ "$OS" = linux ] && [ -n "${LIST_PATH:-}" ] && [ -f "$LIST_PATH" ]; then
+    chan=$(awk '{print $(NF-1)}' "$LIST_PATH" 2>/dev/null) || chan=""
+    case "$chan" in
+      stable | latest)
+        printf '%s' "$chan"
+        return 0
+        ;;
+    esac
+  fi
+  if [ -n "${CHANNEL_MARKER:-}" ] && [ -f "$CHANNEL_MARKER" ]; then
+    chan=$(cat "$CHANNEL_MARKER" 2>/dev/null) || chan=""
+    case "$chan" in
+      stable | latest)
+        printf '%s' "$chan"
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
+# Remembers the channel an install/upgrade ran with, for a later `upgrade`
+# with no --channel to detect when there's no apt line to read it from.
+persist_channel_marker() {
+  [ "$OPT_DRY_RUN" = 1 ] && return 0
+  (umask 077 && mkdir -p "$(dirname "$CHANNEL_MARKER")" && printf '%s\n' "$CHANNEL" >"$CHANNEL_MARKER") 2>/dev/null || :
 }
 
 # Whether the server is being installed with the runtime: the components
@@ -1199,8 +1270,37 @@ parse_tag_name() {
   sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
 }
 
+# Every "tag_name" in a releases-list JSON array, one per line.
+parse_tag_names() {
+  sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# The newest release on the latest channel: highest semver among every
+# release the API lists, pre-releases included (decision 163). No
+# rate-limit-free fallback exists for this one -- it has to list several
+# releases, which the plain web redirect can't -- so a failure here is a
+# failure, same message as the stable path's.
+release_latest_in_list() {
+  local tags tag v best=""
+  tags=$(fetch_url "$STORM_RELEASES_API" 2>/dev/null | parse_tag_names) || tags=""
+  [ -n "$tags" ] || return 1
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    v=$(normalize_version "$tag") || continue
+    if [ -z "$best" ] || ver_lt "$best" "$v"; then best=$v; fi
+  done <<EOF
+$tags
+EOF
+  [ -n "$best" ] || return 1
+  printf '%s' "$best"
+}
+
 release_latest() {
   local tag=""
+  if [ "$CHANNEL" = latest ]; then
+    release_latest_in_list
+    return $?
+  fi
   tag=$(fetch_url "$STORM_LATEST_API" 2>/dev/null | parse_tag_name)
   if [ -z "$tag" ] && command -v curl >/dev/null 2>&1; then
     # The API is rate limited; the web redirect isn't.
@@ -3379,14 +3479,18 @@ choose_mode() {
     return 0
   fi
   if [ "$SUBCOMMAND" = upgrade ]; then
-    if [ -z "$have" ] || ver_lt "$have" "$want"; then set_mode "$c" upgrade; else set_mode "$c" keep; fi
+    if [ -z "$have" ] || ver_lt "$have" "$want" || [ "$CHANNEL_SWITCH" = 1 ]; then
+      set_mode "$c" upgrade
+    else
+      set_mode "$c" keep
+    fi
     return 0
   fi
   if [ "$INTERACTIVE" != 1 ]; then
     set_mode "$c" keep
     return 0
   fi
-  if [ -n "$have" ] && ver_lt "$have" "$want"; then
+  if [ -n "$have" ] && { ver_lt "$have" "$want" || [ "$CHANNEL_SWITCH" = 1 ]; }; then
     ui_menu "$(comp_label "$c") v$have is installed." \
       "Upgrade|to v$want" "Keep|leave v$have as it is" "Repair|reinstall v$want's files" || UI_INDEX=2
     case "$UI_INDEX" in
@@ -3979,6 +4083,9 @@ storm_main() {
     return 2
   fi
   log_init "$SUBCOMMAND $*"
+  case "$SUBCOMMAND" in
+    install | upgrade) persist_channel_marker ;;
+  esac
   if ! WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/storm-install.XXXXXX"); then
     ui_fail "couldn't make a temporary directory"
     return 1
