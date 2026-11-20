@@ -391,6 +391,29 @@ Here Cloudflare's edge is the relay and attests each client's address
 you put nothing else in front of the Worker. Past the Free plan's daily limits
 the relay errors until the day resets; the server and the LAN are unaffected.
 
+## Apt repository (stable + latest)
+
+Decision 163e: one apt repository on GitHub Pages, cumulative across
+releases, with two suites — `stable` and `latest` — never one site rebuilt
+from a single release. `apt-repo.yml` carries the reprepro base (`conf/`,
+`db/`, `dists/`, `pool/`) in a dedicated **`apt-repo` git branch**: it
+restores that branch at the start of every run, adds the new release's debs
+with `deploy/apt-repo-build.sh`, and pushes the result back before deploying
+`publish/` (a stripped copy, `conf`/`db` removed) to Pages. Nothing is
+pushed until the build step succeeds, so a failed run leaves the branch
+exactly as it was — this is why a branch beats re-deriving the repo from
+Pages' own output on every run (which has no history, no atomic commit, and
+is missing `conf`/`db` entirely since `publish/` strips them) or from the
+previous `upload-pages-artifact` artifact (which GitHub Actions can expire
+and does not diff or roll back).
+
+**One-time bootstrap**, before the first `latest` release — today's Pages
+site has only `stable` (v0.18.0): a human with push access runs
+`deploy/apt-repo-bootstrap.sh <keyid>`, which mirrors the live site, rebuilds
+reprepro state for it under both codenames, and prints the `git push` that
+makes it the `apt-repo` branch. The script does this locally; it never runs
+in CI. See its header for the exact steps.
+
 ## MCP clients: `storm-runtime mcp-connect`
 
 Moved to the docs: [Connect an AI app](../docs/site/mcp/connect.md).

@@ -33,6 +33,8 @@ jobs:
       client: ${{ steps.f.outputs.client }}
       live: ${{ steps.f.outputs.live }}
       www: ${{ steps.f.outputs.www }}
+      release_channel: ${{ steps.f.outputs.release_channel }}
+      apt_repo: ${{ steps.f.outputs.apt_repo }}
     steps:
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request'
@@ -91,6 +93,18 @@ jobs:
               - deploy/storm-backup.sh
               - deploy/runtime-tarball.sh
               - tools/installer-tests/**
+            # Decision 163c: the channel a tag publishes to, decided once by
+            # ancestry and read by release.yml's publish job.
+            release_channel:
+              - tools/release-channel.sh
+              - tools/release-channel-test.sh
+              - .github/workflows/release.yml
+            # Decision 163e: the cumulative two-suite apt repo.
+            apt_repo:
+              - deploy/apt-repo-build.sh
+              - deploy/apt-repo-bootstrap.sh
+              - tools/apt-repo-build-test.sh
+              - .github/workflows/apt-repo.yml
             client:
               - *vectors
               - apps/client/**
@@ -455,6 +469,31 @@ jobs:
         env:
           SHELLCHECK: shellcheck
           BATS: ${{ runner.temp }}/bats/bin/bats
+  # Decision 163c: the ancestry check release.yml's publish job reads, proven
+  # against a disposable git repo it builds itself — no checkout content
+  # needed beyond the script.
+  release-channel:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.release_channel == 'true'
+    name: release channel (shell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-release-channel
+
+  # Decision 163e's dry-run proof (163-7): the cumulative repo script against
+  # tiny dummy .debs, for a stable release, a latest release, then a stable
+  # fix — never the real workflow, never a real GitHub Pages deploy.
+  apt-repo-build:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.apt_repo == 'true'
+    name: apt repo build (shell, fixture debs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y reprepro gnupg
+      - run: make test-apt-repo-build
+
   client:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'
