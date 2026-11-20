@@ -3,10 +3,26 @@ name: Release
 # One tag, one release, every artifact. Hand-uploading is how a release ends up
 # holding two different builds — if this workflow did not build it, it is not
 # a release (decision 45).
+#
+# Decision 163: `main` is the stable channel, `staging` is latest. A tag's
+# channel is decided once, by tools/release-channel.sh, in the `channel` job
+# below, and every other job reads its output rather than re-deriving it.
+# workflow_dispatch exists only to run that logic and print what a tag's
+# publish WOULD do, for a dry run — a real release only ever comes from a
+# tag push, unchanged from before this decision.
 
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to evaluate (e.g. v0.18.1)"
+        required: true
+      dry_run:
+        description: "Print the publish decisions without building or creating anything"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -16,9 +32,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Decided once, by ancestry (decision 163c), and read by every other job
+  # through its output rather than re-derived. Cheap, so it runs on both a
+  # real tag push and a workflow_dispatch dry run.
+  channel:
+    name: channel
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      channel: ${{ steps.resolve.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch origin main
+      - id: resolve
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          CHANNEL=$(tools/release-channel.sh "$TAG")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "$TAG is $CHANNEL"
+
+  # The dry run itself (decision 163, slice 163-7's proof): every decision
+  # the publish job below would make for this tag, printed and nothing else.
+  # It never builds, never calls gh release create, and never touches apt.
+  dry-run:
+    name: dry run (workflow_dispatch)
+    needs: channel
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          TAG="${{ needs.channel.outputs.tag }}"
+          CHANNEL="${{ needs.channel.outputs.channel }}"
+          echo "tag: $TAG"
+          echo "channel: $CHANNEL"
+          if [ "$CHANNEL" = stable ]; then
+            echo "gh release create flags: --latest"
+            echo "notes: stable channel banner + today's install commands (install.sh, install.ps1, apt stable, no --channel flag)"
+            echo "apt: added to suite 'stable'; also added to 'latest' if $TAG is newer than everything already there"
+            echo "Pages install.sh / install.ps1: refreshed from this release"
+          else
+            echo "gh release create flags: --prerelease --latest=false"
+            echo "notes: latest channel banner + its install commands (--channel latest / STORM_CHANNEL=latest / storm-runtime-latest / -Channel latest)"
+            echo "apt: added to suite 'latest' only"
+            echo "Pages install.sh / install.ps1: left exactly as they are (stable only)"
+          fi
+          echo "releases/latest: unaffected either way unless this is a stable release (gh's own rule for --latest)"
+          if [ "${{ inputs.dry_run }}" = "false" ]; then
+            echo "note: dry_run=false has no effect here — workflow_dispatch never builds or publishes in this workflow; push a tag for a real release."
+          fi
+
   # Tags used to bypass CI. Gate the publish on a green check first.
   check:
     name: check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -707,7 +776,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-windows, app-linux, web]
+    needs: [channel, server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-windows, app-linux, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -728,16 +797,46 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.channel.outputs.channel }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          NOTES=$(cat <<EOF
-          Storm ${GITHUB_REF_NAME}
+          # Decision 163d: stable is gh's --latest (so releases/latest, which
+          # the public installers and links use, always stays stable);
+          # latest is a pre-release and never --latest.
+          if [ "$CHANNEL" = stable ]; then
+            RELEASE_FLAGS=(--latest)
+            CHANNEL_BANNER=$(cat <<'EOF'
+          **stable channel** — the public line, fixes only. This is what
+          `releases/latest` and the default installers give you.
 
           **Install anything — server, Runtime Host, app, phone pairing — on Linux
           or macOS with the interactive installer:**
-          \`\`\`
+          ```
           curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
-          \`\`\`
+          ```
+          EOF
+          )
+          else
+            RELEASE_FLAGS=(--prerelease --latest=false)
+            CHANNEL_BANNER=$(cat <<'EOF'
+          **latest channel** (decision 163) — the operator's day-to-day line,
+          every feature, not the public default. `releases/latest` and the
+          plain installer stay on stable; install or upgrade this channel
+          explicitly:
+          ```
+          curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --channel latest
+          ```
+          PowerShell: `irm https://dewanshdt.github.io/Storm/install.ps1 | iex` with
+          `-Channel latest`. apt:
+          `deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm latest main`.
+          Homebrew Runtime Host: `brew install dewanshdt/storm/storm-runtime-latest`.
+          EOF
+          )
+          fi
+          NOTES=$(cat <<EOF
+          Storm ${GITHUB_REF_NAME} ($CHANNEL channel)
+
+          $CHANNEL_BANNER
 
           **Windows (decision 99):** in PowerShell,
           \`irm https://dewanshdt.github.io/Storm/install.ps1 | iex\` installs the
@@ -797,16 +896,19 @@ jobs:
           EOF
           )
           gh release create "$GITHUB_REF_NAME" release/* \
-            --title "Storm ${GITHUB_REF_NAME}" \
-            --notes "$NOTES"
+            --title "Storm ${GITHUB_REF_NAME} ($CHANNEL)" \
+            --notes "$NOTES" \
+            "${RELEASE_FLAGS[@]}"
 
   # GITHUB_TOKEN's release:published event does not start other workflows.
   apt:
     name: apt repository
-    needs: [publish]
+    needs: [channel, publish]
     uses: ./.github/workflows/apt-repo.yml
+    with:
+      tag: ${{ needs.channel.outputs.tag }}
     secrets: inherit
     permissions:
-      contents: read
+      contents: write
       pages: write
       id-token: write
