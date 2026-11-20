@@ -612,7 +612,7 @@ www-dev:
 www-check:
 	$(WWW)/scripts/check-claims.sh
 
-## formula-check: Formula/storm-runtime.rb builds the tag release.ts names (decision 83)
+## formula-check: both Formula/storm-runtime*.rb build the tag release.ts names (decisions 83, 163)
 formula-check:
 	tools/formula-check.sh
 

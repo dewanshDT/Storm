@@ -56,6 +56,7 @@ setup_world() {
   # storm-runtime or storm, the installer would rightly skip sudo.
   export FAKE_USER=tester FAKE_REAL_USER FAKE_REAL_ID FAKE_REAL_STAT
   unset STORM_TTY_OUT STORM_LINE_MODE FAKE_HEALTH_DOWN FAKE_PAIR_CREATES_ACCOUNT FAKE_LATEST FAKE_ASSETS
+  unset FAKE_RELEASES_LIST STORM_CHANNEL
   unset FAKE_FIREWALLD FAKE_FIREWALLD_ZONES FAKE_SUDO_DENIED FAKE_IP4_LINK FAKE_IP6
   os_release ubuntu
   mkdir -p "$STORM_TEST_SYSROOT/Applications"
@@ -74,6 +75,26 @@ os_release() {
     fedora) printf 'ID=fedora\nPRETTY_NAME="Fedora Linux 40"\n' ;;
     arch) printf 'ID=arch\nPRETTY_NAME="Arch Linux"\n' ;;
   esac >"$STORM_TEST_OS_RELEASE"
+}
+
+# fake_releases_list "v0.18.1:false" "v0.19.0:true" ... -> FAKE_RELEASES_LIST
+# for the /releases?per_page=30 fake: one field per line, like the real
+# (pretty-printed) API -- the installer's line-based tag_name parser needs
+# that (decision 163).
+fake_releases_list() {
+  local out="[" first=1 spec tag pre
+  for spec in "$@"; do
+    tag=${spec%%:*}
+    pre=${spec#*:}
+    [ "$first" = 1 ] || out="$out,"
+    out="$out
+  {
+    \"tag_name\": \"$tag\",
+    \"prerelease\": $pre
+  }"
+    first=0
+  done
+  printf '%s\n]\n' "$out"
 }
 
 # An active ufw: its config under the sysroot, the fake on PATH.

@@ -81,6 +81,15 @@ shape() { code | sed -n '/^if (\$Runtime -and -not \$User -and -not \$Service) {
   ! code | grep -q "Workspace is for the service"
 }
 
+@test "install.ps1: -Channel picks releases/latest (stable) or the semver-sorted list (latest)" {
+  code | grep -qF "[ValidateSet('stable', 'latest')]"
+  code | grep -qF "[string]\$Channel = 'stable'"
+  code | grep -qF 'releases?per_page=30'
+  code | grep -qF "Invoke-RestMethod \"https://api.github.com/repos/\$Repo/releases/latest\""
+  code | grep -qF 'function Get-SemVerKey'
+  code | grep -q "if (\$Channel -eq 'latest')"
+}
+
 @test "install.ps1: with a host you run, MCP is that host's exe by its full path" {
   code | grep -qF "\$userRuntimeBin = Join-Path \$env:LOCALAPPDATA 'StormRuntime\\bin\\storm-runtime.exe'"
   code | grep -qF "\$mcpViaHost = \$Mcp -and ((\$Runtime -and \$User) -or (-not \$Runtime -and \$userHost))"

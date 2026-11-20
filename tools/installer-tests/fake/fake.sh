@@ -9,7 +9,9 @@
 #
 # Knobs (env): FAKE_UNAME_S/M, FAKE_SERVER_VERSION, FAKE_RUNTIME_VERSION,
 # FAKE_NO_MCP_CONNECT,
-# FAKE_PORT, FAKE_HEALTH_DOWN, FAKE_LATEST, FAKE_ASSETS, FAKE_DIR,
+# FAKE_PORT, FAKE_HEALTH_DOWN, FAKE_LATEST, FAKE_RELEASES_LIST (the latest
+# channel's /releases?per_page=30 body; default: one release, FAKE_LATEST),
+# FAKE_ASSETS, FAKE_DIR,
 # STORM_TEST_SYSROOT, FAKE_IP4_LINK, FAKE_IP6 (the routing table),
 # FAKE_FIREWALLD, FAKE_FIREWALLD_ZONES, FAKE_SUDO_DENIED.
 
@@ -291,6 +293,17 @@ case "$name" in
       */v1/health)
         [ -n "${FAKE_HEALTH_DOWN:-}" ] && exit 7
         echo '{"ok":true}'
+        ;;
+      */releases\?*)
+        # The latest channel's source: every release, newest first, like the
+        # real endpoint; a mocked response (decision 163) can list several.
+        # One field per line, like the real (pretty-printed) API: the
+        # installer's line-based parser needs that, same as releases/latest.
+        if [ -n "${FAKE_RELEASES_LIST:-}" ]; then
+          printf '%s' "$FAKE_RELEASES_LIST"
+        else
+          printf '[\n  {\n    "tag_name": "v%s",\n    "prerelease": false\n  }\n]\n' "${FAKE_LATEST:-0.6.0}"
+        fi
         ;;
       *api.github.com*)
         printf '{\n  "url": "x",\n  "tag_name": "v%s",\n  "name": "v%s"\n}\n' "${FAKE_LATEST:-0.6.0}" "${FAKE_LATEST:-0.6.0}"
