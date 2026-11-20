@@ -21,6 +21,8 @@ import 'package:storm/agent/session_controller.dart';
 import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/agent/terminal_surface.dart';
 import 'package:storm/api/models.dart';
+import 'package:storm/state/client_version.dart'
+    show StormChannel, clientVersionProvider;
 import 'package:storm/ui/theme.dart';
 
 /// Agent Runtime V1, client side (decision 77d).
@@ -865,6 +867,12 @@ void main() {
       },
     ];
 
+    // Matches app()'s clientVersionProvider override; the sheet's own
+    // channel comes from the compiled default (stormChannel), latest with
+    // no --dart-define, which `flutter test` never passes.
+    const testAppVersion = '0.0.0-test';
+    const testChannel = StormChannel.latest;
+
     MockClient server({List<Map<String, dynamic>>? sessions}) => MockClient((
       req,
     ) async {
@@ -895,6 +903,10 @@ void main() {
         agentApiFactoryProvider.overrideWithValue(
           () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
         ),
+        // Widget tests have no platform package info; keep the enroll
+        // sheet's Windows download deterministic (shell_harness.dart's
+        // pattern) rather than racing a MissingPluginException.
+        clientVersionProvider.overrideWith((ref) async => testAppVersion),
       ],
       // Desk width: Settings pages need no router there.
       child: MaterialApp(
@@ -1114,7 +1126,12 @@ void main() {
     void expectOnly(HostPlatform shown) {
       for (final platform in HostPlatform.values) {
         for (final shape in EnrollShape.values) {
-          for (final step in enrollSteps(platform, shape)) {
+          for (final step in enrollSteps(
+            platform,
+            shape,
+            testChannel,
+            testAppVersion,
+          )) {
             expect(
               inDialog(find.text(step.command)),
               platform == shown ? findsWidgets : findsNothing,
@@ -1227,7 +1244,12 @@ void main() {
 
     test('the as-you steps need no sudo and no administrator', () {
       for (final platform in HostPlatform.values) {
-        final you = enrollSteps(platform, EnrollShape.you);
+        final you = enrollSteps(
+          platform,
+          EnrollShape.you,
+          StormChannel.stable,
+          '',
+        );
         for (final step in you) {
           expect(step.command, isNot(contains('sudo')), reason: step.command);
           expect(step.command, isNot(contains('ProgramFiles')));
@@ -1237,16 +1259,31 @@ void main() {
         expect(you.map((s) => s.command).join('\n'), contains('--user'));
       }
       expect(
-        enrollSteps(HostPlatform.linux, EnrollShape.you).first.command,
+        enrollSteps(
+          HostPlatform.linux,
+          EnrollShape.you,
+          StormChannel.stable,
+          '',
+        ).first.command,
         'curl -fsSL https://dewanshdt.github.io/Storm/install.sh | '
         'sh -s -- --yes --runtime --user',
       );
       expect(
-        enrollSteps(HostPlatform.macos, EnrollShape.you).last.command,
+        enrollSteps(
+          HostPlatform.macos,
+          EnrollShape.you,
+          StormChannel.stable,
+          '',
+        ).last.command,
         r'"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" enroll',
       );
       expect(
-        enrollSteps(HostPlatform.windows, EnrollShape.you).last.command,
+        enrollSteps(
+          HostPlatform.windows,
+          EnrollShape.you,
+          StormChannel.stable,
+          '',
+        ).last.command,
         r'& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" enroll',
       );
       expect(
@@ -1269,18 +1306,74 @@ void main() {
       }
     });
 
+    // Decision 163's app-channel slice: a latest build must never recommend
+    // a host install from the stable line.
+    test('a latest build steers the Linux and Windows commands at latest', () {
+      final latestLinux = enrollSteps(
+        HostPlatform.linux,
+        EnrollShape.you,
+        StormChannel.latest,
+        '0.19.0',
+      );
+      expect(latestLinux.first.command, contains('--channel latest'));
+      final stableLinux = enrollSteps(
+        HostPlatform.linux,
+        EnrollShape.you,
+        StormChannel.stable,
+        '0.19.0',
+      );
+      expect(stableLinux.first.command, isNot(contains('--channel')));
+      // Every other Linux step is untouched either way.
+      expect(latestLinux.sublist(1), stableLinux.sublist(1));
+
+      expect(
+        windowsDownloadStep(StormChannel.latest, '0.19.0').command,
+        contains('releases/download/v0.19.0/storm-runtime-windows-x86_64'),
+      );
+      expect(
+        windowsDownloadStep(StormChannel.stable, '0.19.0').command,
+        contains('releases/latest/download/storm-runtime-windows-x86_64'),
+      );
+      // No version known yet (still loading): never guess a broken tag URL.
+      expect(
+        windowsDownloadStep(StormChannel.latest, '').command,
+        contains('releases/latest/download/storm-runtime-windows-x86_64'),
+      );
+      // Homebrew has its own channel formula too (Formula/storm-runtime-latest.rb):
+      // only the install line names it; every other mac command names the
+      // installed binary, not the formula, so it is unaffected.
+      for (final shape in EnrollShape.values) {
+        final latestMac = enrollSteps(
+          HostPlatform.macos,
+          shape,
+          StormChannel.latest,
+          '0.19.0',
+        );
+        final stableMac = enrollSteps(
+          HostPlatform.macos,
+          shape,
+          StormChannel.stable,
+          '0.19.0',
+        );
+        expect(latestMac[1].command, 'brew install storm-runtime-latest');
+        expect(stableMac[1].command, 'brew install storm-runtime');
+        expect(latestMac[0], stableMac[0]);
+        expect(latestMac.sublist(2), stableMac.sublist(2));
+      }
+    });
+
     test('each platform\'s steps are its own, with one enroll step', () {
       final linux = [
         for (final shape in EnrollShape.values)
-          ...enrollSteps(HostPlatform.linux, shape),
+          ...enrollSteps(HostPlatform.linux, shape, StormChannel.stable, ''),
       ];
       final mac = [
         for (final shape in EnrollShape.values)
-          ...enrollSteps(HostPlatform.macos, shape),
+          ...enrollSteps(HostPlatform.macos, shape, StormChannel.stable, ''),
       ];
       final windows = [
         for (final shape in EnrollShape.values)
-          ...enrollSteps(HostPlatform.windows, shape),
+          ...enrollSteps(HostPlatform.windows, shape, StormChannel.stable, ''),
       ];
       for (final step in linux) {
         expect(step.command, isNot(contains('brew')));
@@ -1300,7 +1393,7 @@ void main() {
       }
       for (final platform in HostPlatform.values) {
         for (final shape in EnrollShape.values) {
-          final steps = enrollSteps(platform, shape);
+          final steps = enrollSteps(platform, shape, StormChannel.stable, '');
           final enroll = steps.where((s) => s.pastesString).toList();
           expect(enroll, hasLength(1), reason: '$platform $shape');
           expect(enroll.single.command, contains('storm-runtime'));
@@ -1309,7 +1402,12 @@ void main() {
           expect(enroll.single.command, isNot(contains('storm-enroll:')));
         }
       }
-      final macService = enrollSteps(HostPlatform.macos, EnrollShape.service);
+      final macService = enrollSteps(
+        HostPlatform.macos,
+        EnrollShape.service,
+        StormChannel.stable,
+        '',
+      );
       expect(
         macService.last.command,
         'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
@@ -1319,7 +1417,12 @@ void main() {
         contains('dev.storm.runtime'),
       );
       // `install` puts the binary in Program Files; enroll runs from there.
-      final winService = enrollSteps(HostPlatform.windows, EnrollShape.service);
+      final winService = enrollSteps(
+        HostPlatform.windows,
+        EnrollShape.service,
+        StormChannel.stable,
+        '',
+      );
       expect(
         winService.last.command,
         r'& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll',
