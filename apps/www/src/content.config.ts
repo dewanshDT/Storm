@@ -25,13 +25,19 @@ export const collections = {
     schema: docsSchema(),
   }),
   // One file per release, written during release prep; /changelog lists them
-  // and www-check refuses a release.ts tag that has none.
+  // and www-check refuses a release.ts tag that has none. `channel`
+  // (decision 163h) defaults to stable: every entry written before 163
+  // shipped off `main`, the only line that existed then.
   releases: defineCollection({
     loader: glob({
       pattern: "v*.md",
       base: "../../docs/site/releases",
       generateId: ({ entry }) => entry.replace(/\.md$/, ""),
     }),
-    schema: z.object({ date: z.coerce.date(), summary: z.string() }),
+    schema: z.object({
+      date: z.coerce.date(),
+      summary: z.string(),
+      channel: z.enum(["stable", "latest"]).default("stable"),
+    }),
   }),
 };

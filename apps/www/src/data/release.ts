@@ -1,11 +1,17 @@
 /**
  * Public release + install URLs for www.
- * Bump `tag` when cutting a release; asset names follow release.yml.
+ * Bump `tag` when cutting a stable release; asset names follow release.yml.
  *
  * Apt install lives on GitHub Pages (decision 49) — not on the marketing host.
+ *
+ * `latest` (decision 163h) is the latest-channel tag, a flat string sibling
+ * of `tag`, or `null` while latest isn't ahead of stable —
+ * tools/formula-check.sh parses this exact shape. See apps/www/README.md
+ * "Releases" for which PR bumps which field.
  */
 export const release = {
   tag: "v0.18.1",
+  latest: null as string | null,
   get version() {
     return this.tag.replace(/^v/, "");
   },
@@ -14,6 +20,28 @@ export const release = {
   },
   allUrl: "https://github.com/dewanshDT/Storm/releases",
   latestUrl: "https://github.com/dewanshDT/Storm/releases/latest",
+  /** null until `latest` names a tag (decision 163h). */
+  get latestVersion() {
+    return this.latest ? this.latest.replace(/^v/, "") : null;
+  },
+  get latestNotesUrl() {
+    return this.latest
+      ? `https://github.com/dewanshDT/Storm/releases/tag/${this.latest}`
+      : null;
+  },
+  /** Install commands for the latest channel (decision 163f, 163g). */
+  get latestInstallCommand() {
+    return `curl -fsSL ${this.installScriptUrl} | sh -s -- --channel latest`;
+  },
+  get latestWindowsInstallCommand() {
+    // `iex` alone can't pass arguments through a pipeline; the scriptblock
+    // wrapper is install.ps1's own documented way to (docs/site/install/server.md).
+    return `& ([scriptblock]::Create((irm ${this.aptRoot}install.ps1))) -Channel latest`;
+  },
+  get latestAptLine() {
+    return `deb [signed-by=/usr/share/keyrings/storm.gpg] ${this.aptRoot.replace(/\/$/, "")} latest main`;
+  },
+  latestBrewCommand: "brew install dewanshdt/storm/storm-runtime-latest",
   /** Default listen port from deploy/storm.env.example */
   webPort: 8484,
   /** Apt repository root — never the marketing site. */

@@ -17,7 +17,9 @@ const fmt = (d: Date) => d.toISOString().slice(0, 10);
     <p class="eyebrow">Changelog</p>
     <h1>What changed</h1>
     <p class="lede">
-      Every release, newest first. Downloads and checksums are on
+      Every release, newest first, <strong>stable</strong> and
+      <strong>latest</strong> together, by version. Downloads and checksums
+      are on
       <a href="https://github.com/dewanshDT/Storm/releases" target="_blank" rel="noopener noreferrer"
         >GitHub Releases</a
       >; to upgrade, see <a href="/docs/install/upgrade/">Upgrade and uninstall</a>.
@@ -29,6 +31,9 @@ const fmt = (d: Date) => d.toISOString().slice(0, 10);
       <section class="section wrap-narrow release" id={e.id}>
         <p class="meta">
           <a href={`#${e.id}`}>{e.id}</a> · {fmt(e.data.date)}
+          <span class={`chip channel-badge ${e.data.channel === "latest" ? "chip--amber" : ""}`}>
+            {e.data.channel}
+          </span>
         </p>
         <h2>{e.data.summary}</h2>
         <div class="body">
@@ -58,6 +63,11 @@ const fmt = (d: Date) => d.toISOString().slice(0, 10);
   .meta a {
     color: var(--accent);
     text-decoration: none;
+  }
+  .channel-badge {
+    margin-left: calc(var(--sp) * 1);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .release h2 {
     margin-top: 0;
