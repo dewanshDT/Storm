@@ -19,6 +19,10 @@ name: Acceptance builds
 # manual round): pubspec says 0.1.0, which a release overrides from its tag,
 # and an acceptance build that kept it showed "may not be compatible" against
 # a 0.4 server.
+#
+# Every build also gets `--dart-define=STORM_CHANNEL=latest` (decision 163's
+# app-channel slice): this is "Storm Staging", built from `staging`, never
+# the stable line, and it must never recommend a host install from stable.
 
 on:
   push:
@@ -77,7 +81,8 @@ jobs:
           flutter pub get
           flutter build apk --release \
             --build-name="${RELEASE_VERSION}" \
-            --build-number="${RELEASE_BUILD_NUMBER}"
+            --build-number="${RELEASE_BUILD_NUMBER}" \
+            --dart-define=STORM_CHANNEL=latest
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
             "dist/storm-acceptance-${GITHUB_SHA::7}.apk"
@@ -112,7 +117,8 @@ jobs:
           flutter pub get
           flutter build macos --release \
             --build-name="${RELEASE_VERSION}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=latest
           # The version the app will report (B-3).
           shown=$(plutil -extract CFBundleShortVersionString raw \
             build/macos/Build/Products/Release/Storm.app/Contents/Info.plist)
@@ -157,7 +163,8 @@ jobs:
           flutter pub get
           flutter build windows --release \
             --build-name="${RELEASE_VERSION}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=latest
           tool/package_windows.sh "dist/storm-app-acceptance-${GITHUB_SHA::7}-windows-x86_64.zip" \
             "acceptance ${GITHUB_SHA::7}"
       # AC-D1–D3 as far as a runner can: the zip alone starts a window titled
@@ -217,7 +224,8 @@ jobs:
           flutter pub get
           flutter build linux --release \
             --build-name="${RELEASE_VERSION}" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define=STORM_CHANNEL=latest
           STORM_MAX_GLIBC=2.35 tool/package_linux.sh "${RELEASE_VERSION}+acceptance.${GITHUB_SHA::7}" dist
       - uses: actions/upload-artifact@v4
         with:
