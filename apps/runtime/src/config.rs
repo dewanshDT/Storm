@@ -225,6 +225,51 @@ fn cli_kind() -> String {
     "cli".into()
 }
 
+/// `toml`'s own parse error already names the line and says "duplicate
+/// key", but not what to do about it. This is the one TOML mistake a hand
+/// edit or a half-finished script (never a shipped writer: each one writes
+/// the whole file in one call, only when none exists) is likely to make —
+/// adding a second `key = …` line instead of editing the first — so it gets
+/// its own sentence naming the key and the fix, ahead of `toml`'s own text.
+fn duplicate_key_error(text: &str, err: toml::de::Error, path: &Path) -> anyhow::Error {
+    if err.to_string().contains("duplicate key")
+        && let Some(key) = first_duplicate_top_level_key(text)
+    {
+        return anyhow::anyhow!(
+            "{} sets `{key}` more than once: keep one `{key} = …` line \
+             (merging any values the others held) and remove the rest.\n{err}",
+            path.display(),
+        );
+    }
+    anyhow::Error::new(err).context(format!("parsing {}", path.display()))
+}
+
+/// The first top-level (not `[table]`-scoped) key that appears more than
+/// once in `text`, in source order. Just enough to name the key in an error;
+/// not a TOML parser.
+fn first_duplicate_top_level_key(text: &str) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut in_table = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_table = true;
+            continue;
+        }
+        if in_table {
+            continue;
+        }
+        let key = line.split('=').next().unwrap_or("").trim();
+        if !key.is_empty() && !seen.insert(key.to_string()) {
+            return Some(key.to_string());
+        }
+    }
+    None
+}
+
 impl RuntimeConfig {
     pub fn isolated(&self) -> bool {
         self.isolation == Isolation::PerSession
@@ -233,9 +278,7 @@ impl RuntimeConfig {
     /// Loads `path`, or the defaults when it does not exist.
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = match std::fs::read_to_string(path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
-            }
+            Ok(text) => toml::from_str(&text).map_err(|e| duplicate_key_error(&text, e, path))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
@@ -1092,6 +1135,41 @@ mod tests {
             toml::from_str::<RuntimeConfig>("bogus = 1").is_err(),
             "unknown keys refused"
         );
+    }
+
+    /// Regression for #466: a `runtime.toml` with `workspace_roots` written
+    /// twice (an upgrade path or a hand edit that appended instead of
+    /// editing, never a shipped writer — each one writes the whole file in
+    /// one call, only when none exists) fails to parse with "TOML parse
+    /// error … duplicate key", which said nothing about what to do. `load`
+    /// now names the key and the fix ahead of `toml`'s own text.
+    #[test]
+    fn a_duplicate_key_gives_an_actionable_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.toml");
+        std::fs::write(
+            &path,
+            "workspace_roots = [\"/a\"]\nmax_sessions = 4\nworkspace_roots = [\"/b\"]\n",
+        )
+        .unwrap();
+        let err = RuntimeConfig::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("sets `workspace_roots` more than once"),
+            "{err}"
+        );
+        assert!(err.contains("runtime.toml"), "{err}");
+        assert!(err.contains("duplicate key"), "{err}");
+    }
+
+    /// A duplicate key elsewhere in the file is named just the same, not
+    /// just the one this bug happened to produce.
+    #[test]
+    fn a_duplicate_of_any_top_level_key_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.toml");
+        std::fs::write(&path, "max_sessions = 4\nmax_sessions = 8\n").unwrap();
+        let err = RuntimeConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("sets `max_sessions` more than once"), "{err}");
     }
 
     /// Decision 131b: plugin servers are allowed unless the host says off.
