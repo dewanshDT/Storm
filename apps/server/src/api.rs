@@ -685,6 +685,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(notifications_pause).delete(notifications_unpause),
         )
         .route("/v1/notifications/test", post(notifications_test))
+        // Decision 161, slice 161-9: the ntfy sink's own test, through the
+        // real publish path (distinct from the device OS test above).
+        .route("/v1/notifications/ntfy/test", post(notifications_ntfy_test))
         // Decision 161, slice 161-4: this device's own notification
         // settings, and presence for the deliver hint.
         .route(
@@ -3023,6 +3026,16 @@ async fn notifications_test(
 ) -> ApiResult<Json<crate::agent::notifications::Notification>> {
     Ok(Json(
         crate::ops::send_test_notification(&state, &actor, device_of(&auth)).await?,
+    ))
+}
+
+async fn notifications_ntfy_test(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+) -> ApiResult<Json<crate::ops::notifications::NtfyTestResult>> {
+    Ok(Json(
+        crate::ops::send_test_ntfy(&state, &actor, device_of(&auth)).await?,
     ))
 }
 

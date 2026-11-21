@@ -48,6 +48,7 @@ mod kit;
 mod mcp;
 mod merge;
 mod nettrust;
+mod ntfy_forwarder;
 mod ops;
 mod parse;
 mod registry;
@@ -1264,6 +1265,12 @@ async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
     // whatever the queue already holds — a restart needs nothing special,
     // since a pending row is simply one whose `next_attempt` is past.
     tokio::spawn(crate::feedback::forwarder::run(state.clone()));
+
+    // 161-9: the ntfy sink's forwarder — polls for notices whose 15s
+    // grace has elapsed and publishes them, independent of any device's
+    // presence (Security and privacy: the topic url and token never
+    // leave this task except as the request itself).
+    tokio::spawn(crate::ntfy_forwarder::run(state.clone()));
 
     ops::reconcile_single_user(&state)
         .await

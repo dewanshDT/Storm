@@ -29,6 +29,7 @@ pub mod inbox;
 pub mod jobs;
 pub mod model;
 pub mod notifications;
+pub mod ntfy;
 pub mod park;
 pub mod permission;
 pub mod program;
@@ -1191,6 +1192,9 @@ pub struct AgentManager {
     /// triggers the `os` fallback.
     pending_toasts: Mutex<std::collections::VecDeque<notifications::PendingToast>>,
     changes: changes::Changes,
+    /// 161-9: the ntfy token's secret-at-rest key, loaded once at boot
+    /// (`state/agent/keys/ntfy.key`) — never re-read per request.
+    ntfy_key: ntfy::SecretKey,
     #[cfg(test)]
     pub(crate) record_reads: std::sync::atomic::AtomicUsize,
 }
@@ -1306,6 +1310,7 @@ impl AgentManager {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        let ntfy_key = ntfy::load_or_create_key(state_dir)?;
         Ok(Self {
             store: Mutex::new(store),
             live: Mutex::new(Live::default()),
@@ -1330,6 +1335,7 @@ impl AgentManager {
             deliver_cache: Mutex::new(notifications::DeliverCache::default()),
             pending_toasts: Mutex::new(std::collections::VecDeque::new()),
             changes: changes::Changes::new(),
+            ntfy_key,
             #[cfg(test)]
             record_reads: Default::default(),
         })

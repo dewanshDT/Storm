@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use super::attention::{PERMISSION_PROMPT, QUESTION, SIGN_IN};
+use super::ntfy;
 use super::program::ProgramStatus;
 use super::store::SessionRecord;
 use super::{AgentError, AgentManager, AgentResult, SessionLive, TerminalNoticeItem, now};
@@ -155,7 +156,14 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              -- Mark-as-unread: set once a row goes read -> unread, and never
              -- cleared again, so `scan_notify` can tell a genuine reopen
              -- (no toast) from a first-time unread row (a toast).
-             reopened       INTEGER NOT NULL DEFAULT 0
+             reopened       INTEGER NOT NULL DEFAULT 0,
+             -- 161-9: the ntfy sink's own queue. `pending` until its 15s
+             -- grace (`ntfy_due_at`) elapses, then `sent`/`skipped`/
+             -- `failed` — terminal, never retried again after that. A
+             -- silenced row, and `test` (its own dedicated endpoint), are
+             -- `skipped` from the start and carry no `ntfy_due_at`.
+             ntfy_state     TEXT NOT NULL DEFAULT 'pending',
+             ntfy_due_at    TEXT
          );
          CREATE INDEX IF NOT EXISTS notifications_by_seq ON notifications(seq);
          CREATE INDEX IF NOT EXISTS notifications_by_updated ON notifications(updated_seq);
@@ -199,6 +207,15 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              retention_rows              INTEGER NOT NULL DEFAULT 1000,
              mutes_version               INTEGER NOT NULL DEFAULT 1,
              cleared_version             INTEGER NOT NULL DEFAULT 1,
+             -- 161-9: the ntfy sink. `ntfy_token_sealed`/`_nonce` hold the
+             -- optional bearer token, sealed with the server's own ntfy
+             -- key (`agent::ntfy`) — never a plaintext column, and never
+             -- part of a GET response (`Prefs.ntfy_token_set` instead).
+             -- Enabled iff `ntfy_url` is set.
+             ntfy_url                    TEXT,
+             ntfy_token_sealed           BLOB,
+             ntfy_token_nonce            BLOB,
+             ntfy_preview                TEXT NOT NULL DEFAULT 'session',
              updated_at                  TEXT NOT NULL
          );
 
@@ -262,6 +279,33 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
         conn.execute(
             "ALTER TABLE notifications ADD COLUMN reopened INTEGER NOT NULL DEFAULT 0",
             [],
+        )?;
+    }
+    // 161-9, additive: a database from before the ntfy sink gains its
+    // queue columns. `DEFAULT 'pending'` on `ADD COLUMN` would otherwise
+    // mark every pre-existing row pending too, and the forwarder would
+    // try to publish a backlog of years-old notices the moment someone
+    // first sets a topic URL — so every existing row is swept to
+    // `skipped` right after the column is added.
+    let has_ntfy_state = conn
+        .prepare("SELECT 1 FROM pragma_table_info('notifications') WHERE name = 'ntfy_state'")?
+        .exists([])?;
+    if !has_ntfy_state {
+        conn.execute_batch(
+            "ALTER TABLE notifications ADD COLUMN ntfy_state TEXT NOT NULL DEFAULT 'pending';
+             ALTER TABLE notifications ADD COLUMN ntfy_due_at TEXT;",
+        )?;
+        conn.execute("UPDATE notifications SET ntfy_state = 'skipped'", [])?;
+    }
+    let has_ntfy_url = conn
+        .prepare("SELECT 1 FROM pragma_table_info('notification_prefs') WHERE name = 'ntfy_url'")?
+        .exists([])?;
+    if !has_ntfy_url {
+        conn.execute_batch(
+            "ALTER TABLE notification_prefs ADD COLUMN ntfy_url TEXT;
+             ALTER TABLE notification_prefs ADD COLUMN ntfy_token_sealed BLOB;
+             ALTER TABLE notification_prefs ADD COLUMN ntfy_token_nonce BLOB;
+             ALTER TABLE notification_prefs ADD COLUMN ntfy_preview TEXT NOT NULL DEFAULT 'session';",
         )?;
     }
     Ok(())
@@ -491,6 +535,17 @@ pub struct Prefs {
     pub per_session_limit: i64,
     pub retention_days: i64,
     pub retention_rows: i64,
+    /// 161-9: the ntfy sink's topic URL; `None` means off ("enabled iff
+    /// url set").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ntfy_url: Option<String>,
+    /// Never the token itself — a GET never returns it (Security and
+    /// privacy: "the token is a secret, never logged/echoed").
+    pub ntfy_token_set: bool,
+    /// `"full" | "session" | "storm"` (shares its values with the device
+    /// preview levels, `auth::device_prefs::PREVIEWS`); default
+    /// `"session"`.
+    pub ntfy_preview: String,
 }
 
 impl Prefs {
@@ -522,6 +577,9 @@ impl Prefs {
             per_session_limit: 20,
             retention_days: 30,
             retention_rows: 1000,
+            ntfy_url: None,
+            ntfy_token_set: false,
+            ntfy_preview: "session".into(),
         }
     }
 
@@ -548,6 +606,7 @@ fn events_json(events: &HashMap<String, EventPref>) -> Result<String> {
 fn row_to_prefs(row: &rusqlite::Row) -> rusqlite::Result<Prefs> {
     let events_s: String = row.get(1)?;
     let events: HashMap<String, EventPref> = serde_json::from_str(&events_s).unwrap_or_default();
+    let ntfy_token_sealed: Option<Vec<u8>> = row.get(14)?;
     Ok(Prefs {
         version: row.get(0)?,
         events,
@@ -563,12 +622,16 @@ fn row_to_prefs(row: &rusqlite::Row) -> rusqlite::Result<Prefs> {
         per_session_limit: row.get(11)?,
         retention_days: row.get(12)?,
         retention_rows: row.get(13)?,
+        ntfy_url: row.get(15)?,
+        ntfy_token_set: ntfy_token_sealed.is_some(),
+        ntfy_preview: row.get(16)?,
     })
 }
 
 const PREFS_COLUMNS: &str = "version, events, quiet_on, quiet_start, quiet_end, quiet_tz, \
     quiet_allow_delete_requests, summary_on, paused_until, agent_default_on, \
-    children_default_on, per_session_limit, retention_days, retention_rows";
+    children_default_on, per_session_limit, retention_days, retention_rows, \
+    ntfy_token_sealed, ntfy_url, ntfy_preview";
 
 pub(super) fn load_prefs(conn: &Connection) -> Result<Prefs> {
     if let Some(p) = conn
@@ -586,8 +649,9 @@ pub(super) fn load_prefs(conn: &Connection) -> Result<Prefs> {
         "INSERT INTO notification_prefs
              (only_row, version, events, quiet_on, quiet_start, quiet_end, quiet_tz,
               quiet_allow_delete_requests, summary_on, paused_until, agent_default_on,
-              children_default_on, per_session_limit, retention_days, retention_rows, updated_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+              children_default_on, per_session_limit, retention_days, retention_rows,
+              ntfy_url, ntfy_preview, updated_at)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             defaults.version,
             events_json(&defaults.events)?,
@@ -603,6 +667,8 @@ pub(super) fn load_prefs(conn: &Connection) -> Result<Prefs> {
             defaults.per_session_limit,
             defaults.retention_days,
             defaults.retention_rows,
+            defaults.ntfy_url,
+            defaults.ntfy_preview,
             now(),
         ],
     )?;
@@ -641,6 +707,17 @@ pub struct PrefsPatch {
     pub retention_days: Option<i64>,
     #[serde(default)]
     pub retention_rows: Option<i64>,
+    /// `Some("")` clears the sink (and any stored token with it); `None`
+    /// leaves it unchanged.
+    #[serde(default)]
+    pub ntfy_url: Option<String>,
+    /// The raw token, never kept in [`Prefs`]. `Some("")` clears a stored
+    /// token; `None` leaves it unchanged. Handled directly in
+    /// [`save_prefs`], outside [`apply_patch`].
+    #[serde(default)]
+    pub ntfy_token: Option<String>,
+    #[serde(default)]
+    pub ntfy_preview: Option<String>,
 }
 
 /// Applies `patch` over `base`, keeping everything the patch left out.
@@ -683,6 +760,12 @@ fn apply_patch(mut base: Prefs, patch: PrefsPatch) -> Prefs {
     if let Some(v) = patch.retention_rows {
         base.retention_rows = v;
     }
+    if let Some(v) = patch.ntfy_url {
+        base.ntfy_url = if v.trim().is_empty() { None } else { Some(v) };
+    }
+    if let Some(v) = patch.ntfy_preview {
+        base.ntfy_preview = v;
+    }
     base
 }
 
@@ -724,36 +807,65 @@ fn validate_prefs(p: &Prefs) -> std::result::Result<(), String> {
             return Err(format!("{k}'s threshold_s must be 0-86400"));
         }
     }
+    if let Some(url) = &p.ntfy_url
+        && let Err(msg) = ntfy::validate_url(url)
+    {
+        return Err(msg);
+    }
+    if !crate::auth::device_prefs::PREVIEWS.contains(&p.ntfy_preview.as_str()) {
+        return Err(format!(
+            "\"{}\" is not a notification preview level",
+            p.ntfy_preview
+        ));
+    }
     Ok(())
 }
 
 /// `save_prefs`'s two ways of not saving: `expected_version` was stale, or
 /// the result of applying the patch would not validate.
 pub(super) enum SaveOutcome {
-    Saved(Prefs),
+    // Boxed: `Prefs` grew past clippy's large-enum-variant threshold once
+    // the ntfy fields (161-9) joined it, and `Conflict`/`Invalid` are tiny
+    // by comparison.
+    Saved(Box<Prefs>),
     Conflict,
     Invalid(String),
 }
 
 /// `UPDATE … WHERE version = expected`, so two devices saving at once don't
-/// clobber each other (Q15).
-fn save_prefs(conn: &Connection, expected_version: i64, patch: PrefsPatch) -> Result<SaveOutcome> {
+/// clobber each other (Q15). `ntfy_key` seals a patched token (161-9); the
+/// token never passes through [`apply_patch`]/[`Prefs`] itself, since a GET
+/// must never be able to echo it back.
+fn save_prefs(
+    conn: &Connection,
+    expected_version: i64,
+    mut patch: PrefsPatch,
+    ntfy_key: &ntfy::SecretKey,
+) -> Result<SaveOutcome> {
     let current = load_prefs(conn)?;
     if current.version != expected_version {
         return Ok(SaveOutcome::Conflict);
+    }
+    let token_patch = patch.ntfy_token.take();
+    if let Some(t) = &token_patch
+        && !t.is_empty()
+        && let Err(msg) = validate_ntfy_token(t)
+    {
+        return Ok(SaveOutcome::Invalid(msg));
     }
     let next = apply_patch(current, patch);
     if let Err(msg) = validate_prefs(&next) {
         return Ok(SaveOutcome::Invalid(msg));
     }
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
         "UPDATE notification_prefs SET
              version = version + 1, events = ?1, quiet_on = ?2, quiet_start = ?3,
              quiet_end = ?4, quiet_tz = ?5, quiet_allow_delete_requests = ?6,
              summary_on = ?7, agent_default_on = ?8, children_default_on = ?9,
              per_session_limit = ?10, retention_days = ?11, retention_rows = ?12,
-             updated_at = ?13
-         WHERE only_row = 1 AND version = ?14",
+             ntfy_url = ?13, ntfy_preview = ?14, updated_at = ?15
+         WHERE only_row = 1 AND version = ?16",
         params![
             events_json(&next.events)?,
             next.quiet_on,
@@ -767,6 +879,8 @@ fn save_prefs(conn: &Connection, expected_version: i64, patch: PrefsPatch) -> Re
             next.per_session_limit,
             next.retention_days,
             next.retention_rows,
+            next.ntfy_url,
+            next.ntfy_preview,
             now(),
             expected_version,
         ],
@@ -774,7 +888,48 @@ fn save_prefs(conn: &Connection, expected_version: i64, patch: PrefsPatch) -> Re
     if changed == 0 {
         return Ok(SaveOutcome::Conflict);
     }
-    Ok(SaveOutcome::Saved(load_prefs(conn)?))
+    // Clearing the url also clears any stored token, so disabling the
+    // sink never leaves an orphaned secret sitting sealed in the row.
+    match token_patch {
+        Some(t) if !t.is_empty() => {
+            let sealed = ntfy_key.seal(&t)?;
+            tx.execute(
+                "UPDATE notification_prefs SET ntfy_token_sealed = ?1, ntfy_token_nonce = ?2
+                 WHERE only_row = 1",
+                params![sealed.ciphertext, sealed.nonce],
+            )?;
+        }
+        Some(_) => {
+            tx.execute(
+                "UPDATE notification_prefs SET ntfy_token_sealed = NULL, ntfy_token_nonce = NULL
+                 WHERE only_row = 1",
+                [],
+            )?;
+        }
+        None if next.ntfy_url.is_none() => {
+            tx.execute(
+                "UPDATE notification_prefs SET ntfy_token_sealed = NULL, ntfy_token_nonce = NULL
+                 WHERE only_row = 1",
+                [],
+            )?;
+        }
+        None => {}
+    }
+    tx.commit()?;
+    Ok(SaveOutcome::Saved(Box::new(load_prefs(conn)?)))
+}
+
+/// `ntfy_token`: a bearer token, bounded and free of control characters —
+/// never logged, so the bound exists only to keep a pasted file or an
+/// absurd value out of the row, not to shape what ntfy itself accepts.
+fn validate_ntfy_token(token: &str) -> std::result::Result<(), String> {
+    if token.len() > 512 {
+        return Err("ntfy_token must be at most 512 characters".into());
+    }
+    if token.chars().any(|c| c.is_control()) {
+        return Err("ntfy_token must not contain control characters".into());
+    }
+    Ok(())
 }
 
 /// Bumps `version` too, so `prefs_changed` reaches every other device —
@@ -1162,14 +1317,26 @@ fn insert_notice(
     }
     let id = crate::auth::identity::random_id("ntf_");
     let created = now();
+    // 161-9: every non-silent notice is also a candidate for the ntfy
+    // sink, independent of any device's presence. A silenced one (quiet
+    // hours, paused, muted) is never sent there either; `test` has its
+    // own dedicated endpoint (`POST /v1/notifications/ntfy/test`) rather
+    // than riding this general path, so clicking the device OS test never
+    // doubles as an ntfy send.
+    let (ntfy_state, ntfy_due_at): (&str, Option<String>) = if silence.is_some() || n.kind == TEST {
+        ("skipped", None)
+    } else {
+        ("pending", Some(ntfy::due_at(&created)))
+    };
     let tx = conn.unchecked_transaction()?;
     let seq = next_counter(&tx)?;
     let changed = tx.execute(
         "INSERT INTO notifications
              (id, seq, updated_seq, created, source, kind, session_id, host_id, provider,
               session_title, note_vault_id, note_id, title, body, urgency, key, silent,
-              silent_reason)
-         VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+              silent_reason, ntfy_state, ntfy_due_at)
+         VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18, ?19)
          ON CONFLICT(key) DO NOTHING",
         params![
             id,
@@ -1189,6 +1356,8 @@ fn insert_notice(
             n.key,
             silence.is_some(),
             silence,
+            ntfy_state,
+            ntfy_due_at,
         ],
     )?;
     if changed == 0 {
@@ -1210,6 +1379,30 @@ fn list_notifications(conn: &Connection, after_seq: i64, limit: i64) -> Result<V
     ))?;
     let rows = stmt.query_map(params![after_seq, limit], row_to_notification)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// 161-9: notices still `pending` whose grace (`ntfy_due_at`) has elapsed
+/// — read fresh on every poll, so `read_at`/`cancelled` reflect the "need
+/// cleared" case right up to send time.
+fn query_due_ntfy(conn: &Connection, at: &str, limit: i64) -> Result<Vec<Notification>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {NOTIF_COLUMNS} FROM notifications
+         WHERE ntfy_state = 'pending' AND ntfy_due_at <= ?1
+         ORDER BY seq LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![at, limit], row_to_notification)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Terminal: `sent`, `skipped` or `failed`. Never retried again after
+/// this — bounded retry happens inside one [`ntfy::publish_with_retry`]
+/// call, not across polls.
+fn update_ntfy_state(conn: &Connection, id: &str, state: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE notifications SET ntfy_state = ?1 WHERE id = ?2",
+        params![state, id],
+    )?;
+    Ok(())
 }
 
 /// By `updated_seq` rather than `seq`: a mark-read moves a row's
@@ -2409,16 +2602,48 @@ impl AgentManager {
     ) -> AgentResult<Prefs> {
         let saved = {
             let store = self.store.lock().unwrap();
-            save_prefs(&store.conn, expected_version, patch)?
+            save_prefs(&store.conn, expected_version, patch, &self.ntfy_key)?
         };
         match saved {
             SaveOutcome::Saved(p) => {
                 self.poke_notify();
-                Ok(p)
+                Ok(*p)
             }
             SaveOutcome::Conflict => Err(AgentError::Conflict("prefs_version".into())),
             SaveOutcome::Invalid(msg) => Err(AgentError::BadRequest(msg)),
         }
+    }
+
+    /// 161-9: the sink's settings with its token opened, or `None` when no
+    /// topic url is set. Read fresh on every call — never cached — so the
+    /// token is in memory only as long as sending one request needs it.
+    pub fn ntfy_settings(&self) -> AgentResult<Option<ntfy::NtfySettings>> {
+        let store = self.store.lock().unwrap();
+        Ok(ntfy::load_settings(&store.conn, &self.ntfy_key)?)
+    }
+
+    /// 161-9: notices whose ntfy grace has elapsed, for the forwarder task
+    /// (`crate::ntfy_forwarder`) to attempt. `at` is an RFC3339 instant;
+    /// rows due at or before it are returned, oldest first.
+    pub fn due_ntfy_notices(&self, at: &str, limit: i64) -> AgentResult<Vec<Notification>> {
+        Ok(query_due_ntfy(&self.store.lock().unwrap().conn, at, limit)?)
+    }
+
+    /// 161-9: records a due notice's outcome (`"sent"`, `"skipped"` or
+    /// `"failed"`) — terminal, never retried again after this call.
+    pub fn mark_ntfy_outcome(&self, id: &str, outcome: &str) -> AgentResult<()> {
+        update_ntfy_state(&self.store.lock().unwrap().conn, id, outcome)?;
+        Ok(())
+    }
+
+    /// 161-9: whether an active device already has `session_id` open right
+    /// now — the same "nothing to add" case [`Self::compute_deliver_hint`]
+    /// answers `None` for. ntfy skips a notice entirely in that case, both
+    /// at the forwarder's grace-elapsed check and, since nothing else
+    /// consults it before then, implicitly before the grace too (the row
+    /// is simply not due yet). `None` (no session) is never "open".
+    pub fn active_device_has_session_open(&self, session_id: Option<&str>) -> bool {
+        session_id.is_some() && self.compute_deliver_hint(session_id).is_none()
     }
 
     pub fn list_notifications(&self, after: i64, limit: i64) -> AgentResult<Vec<Notification>> {
@@ -3208,5 +3433,7 @@ impl AgentManager {
     }
 }
 
+#[cfg(test)]
+mod ntfy_tests;
 #[cfg(test)]
 mod tests;

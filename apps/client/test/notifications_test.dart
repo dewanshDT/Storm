@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,7 +15,9 @@ import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/notifications_models.dart';
 import 'package:storm/agent/notifications_state.dart';
+import 'package:storm/agent/ntfy_topic.dart';
 import 'package:storm/router.dart';
+import 'package:storm/ui/controls.dart';
 
 import 'agent_fakes.dart';
 import 'fake_server.dart';
@@ -489,6 +492,205 @@ void main() {
     });
   });
 
+  group('ntfy sink (slice 161-9)', () {
+    Future<void> gotoNotifications(
+      WidgetTester tester,
+      ProviderContainer c,
+    ) async {
+      await pumpShell(tester, c, size: wide);
+      c.read(routerProvider).go(Routes.settingsPage('notifications'));
+      await tester.pumpAndSettle();
+    }
+
+    TextField urlField() =>
+        find
+                .descendant(
+                  of: find.byKey(const Key('ntfy-url')),
+                  matching: find.byType(TextField),
+                )
+                .evaluate()
+                .single
+                .widget
+            as TextField;
+
+    TextField tokenField() =>
+        find
+                .descendant(
+                  of: find.byKey(const Key('ntfy-token')),
+                  matching: find.byType(TextField),
+                )
+                .evaluate()
+                .single
+                .widget
+            as TextField;
+
+    testWidgets('empty state: no url, test disabled, a generic token hint', (
+      tester,
+    ) async {
+      final notif = FakeNotifications();
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await gotoNotifications(tester, c);
+      expect(urlField().controller!.text, '');
+      expect(tokenField().decoration!.hintText, 'Bearer token');
+      final testButton = tester.widget<StormButton>(
+        find.byKey(const Key('ntfy-test')),
+      );
+      expect(testButton.onPressed, isNull, reason: 'nothing to test yet');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('"Generate private topic" fills the field and saves it', (
+      tester,
+    ) async {
+      final notif = FakeNotifications();
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await gotoNotifications(tester, c);
+      await tester.ensureVisible(find.byKey(const Key('ntfy-generate')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('ntfy-generate')));
+      await tester.pumpAndSettle();
+      final url = notif.prefs['ntfy_url'] as String?;
+      expect(url, isNotNull);
+      final topic = Uri.parse(url!).path.substring(1);
+      expect(
+        topic,
+        matches(
+          RegExp('^storm-[$kNtfyTopicAlphabet]{$kNtfyTopicRandomLength}\$'),
+        ),
+      );
+      expect(urlField().controller!.text, url);
+      final testButton = tester.widget<StormButton>(
+        find.byKey(const Key('ntfy-test')),
+      );
+      expect(testButton.onPressed, isNotNull, reason: 'now configured');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('setting a token shows "Set", never the value, once saved', (
+      tester,
+    ) async {
+      final notif = FakeNotifications()
+        ..prefs['ntfy_url'] = 'https://ntfy.sh/storm-existing';
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await gotoNotifications(tester, c);
+      expect(tokenField().decoration!.hintText, 'Bearer token');
+      await tester.ensureVisible(find.byKey(const Key('ntfy-token')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('ntfy-token')), 'tk_secret');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(notif.prefs['ntfy_token_set'], isTrue);
+      expect(
+        tokenField().controller!.text,
+        '',
+        reason: 'never kept or re-shown once it lands',
+      );
+      expect(tokenField().decoration!.hintText, 'Set');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Test shows the result, both success and failure', (
+      tester,
+    ) async {
+      final notif = FakeNotifications()
+        ..prefs['ntfy_url'] = 'https://ntfy.sh/storm-existing';
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await gotoNotifications(tester, c);
+      await tester.ensureVisible(find.byKey(const Key('ntfy-test')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('ntfy-test')));
+      await tester.pumpAndSettle();
+      expect(find.text('Sent — check your phone.'), findsOneWidget);
+
+      notif.nextNtfyTestResult = const NtfyTestResult(
+        sent: false,
+        error: 'http 401',
+      );
+      await tester.tap(find.byKey(const Key('ntfy-test')));
+      await tester.pumpAndSettle();
+      expect(find.text('Failed: http 401'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('"Full text" shows the plain-text warning', (tester) async {
+      final notif = FakeNotifications()
+        ..prefs['ntfy_url'] = 'https://ntfy.sh/storm-existing';
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await gotoNotifications(tester, c);
+      expect(find.textContaining('ntfy as plain text'), findsNothing);
+      // "Full text" also labels the (desktop) device preview chips
+      // elsewhere on this page — scope the tap to the ntfy section's own
+      // chips.
+      final fullTextChip = find.descendant(
+        of: find.byKey(const Key('ntfy-preview')),
+        matching: find.text('Full text'),
+      );
+      await tester.ensureVisible(fullTextChip);
+      await tester.pumpAndSettle();
+      await tester.tap(fullTextChip);
+      await tester.pumpAndSettle();
+      expect(notif.prefs['ntfy_preview'], 'full');
+      expect(find.textContaining('ntfy as plain text'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('Android "This device" is honest about delivery (slice 161-9)', () {
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    testWidgets('no ntfy: in-app only, with a link down to ntfy', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final notif = FakeNotifications();
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await pumpShell(tester, c, size: wide);
+      c.read(routerProvider).go(Routes.settingsPage('notifications'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('device-delivery-mobile')), findsOneWidget);
+      expect(
+        find.textContaining('Only inside the app while it\'s open'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Via ntfy'), findsNothing);
+      await tester.tap(find.byKey(const Key('device-set-up-ntfy')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ntfy-url')), findsOneWidget);
+      await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('ntfy configured: account-wide delivery, no link shown', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final notif = FakeNotifications()
+        ..prefs['ntfy_url'] = 'https://ntfy.sh/storm-x';
+      final agents = FakeAgentServer(hosts: [host()]);
+      agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client);
+      await pumpShell(tester, c, size: wide);
+      c.read(routerProvider).go(Routes.settingsPage('notifications'));
+      await tester.pumpAndSettle();
+      expect(find.text('Via ntfy (account-wide)'), findsOneWidget);
+      expect(find.byKey(const Key('device-set-up-ntfy')), findsNothing);
+      await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
+
   group('the launcher chip', () {
     testWidgets('reflects agent_default_on until the person touches it', (
       tester,
@@ -880,7 +1082,13 @@ class FakeNotifications {
     'per_session_limit': 20,
     'retention_days': 30,
     'retention_rows': 1000,
+    'ntfy_url': null,
+    'ntfy_token_set': false,
+    'ntfy_preview': 'session',
   };
+
+  /// `/v1/notifications/ntfy/test`'s next answer; defaults to a success.
+  NtfyTestResult nextNtfyTestResult = const NtfyTestResult(sent: true);
 
   void push({
     required String id,
@@ -968,6 +1176,14 @@ class FakeNotifications {
             events['${e.key}'] = e.value;
           }
           next['events'] = events;
+        } else if (key == 'ntfy_token') {
+          // Like the real server: never echoed back, only whether one is
+          // set.
+          next['ntfy_token_set'] = (body['ntfy_token'] as String).isNotEmpty;
+        } else if (key == 'ntfy_url' && (body['ntfy_url'] as String).isEmpty) {
+          // Clearing the url clears any stored token too.
+          next['ntfy_url'] = null;
+          next['ntfy_token_set'] = false;
         } else {
           next[key] = body[key];
         }
@@ -1033,6 +1249,13 @@ class FakeNotifications {
       };
       items.add(n);
       return _json(n);
+    }
+    if (path == '/v1/notifications/ntfy/test' && req.method == 'POST') {
+      final result = nextNtfyTestResult;
+      return _json({
+        'sent': result.sent,
+        if (result.error != null) 'error': result.error,
+      });
     }
     if (path == '/v1/agent/sessions/notify-off' && req.method == 'POST') {
       final body = jsonDecode(req.body) as Map<String, dynamic>;
