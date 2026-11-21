@@ -34,6 +34,7 @@ pub mod identity;
 pub mod keys;
 pub mod pairing;
 pub mod password;
+pub mod push_endpoints;
 pub mod ratelimit;
 pub mod sessions;
 pub mod single_user;

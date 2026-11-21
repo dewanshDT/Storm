@@ -329,6 +329,13 @@ pub fn key_path(state_dir: &Path, key_id: &str) -> PathBuf {
 /// there is an instant where the file exists and anyone can read it, and a
 /// homelab box with other users on it is exactly where that matters.
 pub(crate) fn write_key_file(path: &Path, secret: &[u8; 32]) -> Result<()> {
+    write_secret_bytes(path, secret)
+}
+
+/// [`write_key_file`], generalised to any length — the VAPID private key
+/// (decision 161, AM125) is a variable-length PKCS#8 document, not a fixed
+/// 32-byte seed.
+pub(crate) fn write_secret_bytes(path: &Path, secret: &[u8]) -> Result<()> {
     create_private_dir(path.parent().expect("key path has a parent"))?;
 
     let mut options = std::fs::OpenOptions::new();

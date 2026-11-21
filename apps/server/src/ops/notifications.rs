@@ -246,7 +246,12 @@ pub async fn get_device_prefs(
     let device = calling_device(device)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    Ok(auth_db.ensure_device_prefs(device, platform, &now)?)
+    let mut prefs = auth_db.ensure_device_prefs(device, platform, &now)?;
+    // Decision 161, slice 161-6: endpoint health, cheaply — one indexed
+    // query by device_id, the same connection already held for the
+    // `ensure_device_prefs` call above.
+    prefs.push = auth_db.push_endpoint_health(device)?;
+    Ok(prefs)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

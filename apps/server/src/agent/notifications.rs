@@ -2459,6 +2459,25 @@ impl AgentManager {
         )?)
     }
 
+    /// One notice by id — 161-6's push-delivery worker reads a notice
+    /// fresh at send time (never caching it from the grace-window scan),
+    /// so a preview-level change or a late cancellation between enqueue
+    /// and send is still honoured.
+    pub fn notification_by_id(&self, id: &str) -> AgentResult<Option<Notification>> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                &format!("SELECT {NOTIF_COLUMNS} FROM notifications WHERE id = ?1"),
+                params![id],
+                row_to_notification,
+            )
+            .optional()
+            .map_err(anyhow::Error::from)?)
+    }
+
     pub fn mark_notifications_read(
         &self,
         ids: &[String],
@@ -2728,6 +2747,23 @@ impl AgentManager {
             .unwrap()
             .iter()
             .any(|((d, _), p)| d == device_id && p.active)
+    }
+
+    /// Decision 161-6: whether *any* device has a live `/v1/agent/events`
+    /// connection right now, active or merely backgrounded — the push
+    /// policy's "everything else" tier (step 4 of "Duplicates with the app
+    /// in front") needs exactly this, since a connected-but-backgrounded
+    /// desktop already gets `compute_deliver_hint`'s `os` local
+    /// notification and must never also receive a push for the same
+    /// notice. Stale entries (past [`PRESENCE_IDLE_TIMEOUT`]) don't count,
+    /// the same staleness rule `compute_deliver_hint` applies, so a socket
+    /// gone quiet without a clean close is treated as gone.
+    pub fn any_device_connected(&self) -> bool {
+        self.presence
+            .lock()
+            .unwrap()
+            .values()
+            .any(|p| p.last_seen.elapsed() <= PRESENCE_IDLE_TIMEOUT)
     }
 
     /// 161h item 2: if `device_id` has gone inactive on every connection,

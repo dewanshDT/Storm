@@ -67,6 +67,16 @@ pub struct CredentialRow {
     pub created: String,
 }
 
+/// The one row in `vapid_keypair` (decision 161, AM125). Deliberately a
+/// separate table from `server_credentials` — see the schema comment on
+/// `vapid_keypair` in `migrate()`.
+#[derive(Debug, Clone)]
+pub struct VapidKeypairRow {
+    pub key_id: String,
+    pub public_key: Vec<u8>,
+    pub created: String,
+}
+
 impl AuthDb {
     /// Opens (creating if absent) `<state_dir>/auth.db`.
     pub fn open(state_dir: &Path) -> Result<Self> {
@@ -238,6 +248,70 @@ impl AuthDb {
                 classes    TEXT NOT NULL DEFAULT '[]',
                 preview    TEXT NOT NULL DEFAULT 'full',
                 updated_at TEXT NOT NULL
+            );
+
+            -- Decision 161, slice 161-6 (AM125): a device's closed-app push
+            -- registration. `kind` is `webpush` (the browser's own push
+            -- service) or `unifiedpush` (an Android distributor, e.g. ntfy
+            -- in 161-8); both speak the same RFC 8291 payload, so one table
+            -- and one sender serve both. `p256dh`/`endpoint` are public
+            -- subscription metadata; `auth_secret_enc` is the only secret
+            -- here and is sealed at rest (`push::crypto::seal_secret`),
+            -- never logged. Deleted in the same transaction as a device
+            -- revoke (`mark_device_revoked`, an UPDATE, so this cascade
+            -- never fires on its own — see that function).
+            CREATE TABLE IF NOT EXISTS push_endpoints (
+                id              TEXT PRIMARY KEY,
+                device_id       TEXT NOT NULL REFERENCES client_devices(id) ON DELETE CASCADE,
+                kind            TEXT NOT NULL CHECK (kind IN ('webpush', 'unifiedpush')),
+                endpoint        TEXT NOT NULL,
+                p256dh          TEXT NOT NULL,
+                auth_secret_enc BLOB NOT NULL,
+                created         TEXT NOT NULL,
+                last_ok         TEXT,
+                failures        INTEGER NOT NULL DEFAULT 0,
+                -- A browser or distributor that resubscribes (a routine
+                -- refresh, not a new device) re-presents the same
+                -- (device, endpoint) pair; upserting it keeps one row
+                -- instead of accumulating dead ones with the same URL.
+                UNIQUE (device_id, endpoint)
+            );
+            CREATE INDEX IF NOT EXISTS push_endpoints_by_device ON push_endpoints(device_id);
+
+            -- The delivery queue (161-6): one row per (notice, endpoint),
+            -- persisted so a restart mid-retry resumes rather than losing
+            -- the notice. `notice_id` names a row in `agent.db`
+            -- `notifications` — no FK, since the two are separate database
+            -- files; a notice outliving its push rows (or the reverse) is
+            -- harmless, and the worker treats a missing notice as nothing
+            -- left to send. Deleted with its endpoint.
+            CREATE TABLE IF NOT EXISTS push_deliveries (
+                id           TEXT PRIMARY KEY,
+                endpoint_id  TEXT NOT NULL REFERENCES push_endpoints(id) ON DELETE CASCADE,
+                notice_id    TEXT NOT NULL,
+                collapse_key TEXT NOT NULL,
+                urgency      TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+                created      TEXT NOT NULL,
+                not_before   TEXT NOT NULL,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                last_error   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS push_deliveries_by_due ON push_deliveries(not_before);
+            CREATE INDEX IF NOT EXISTS push_deliveries_by_endpoint ON push_deliveries(endpoint_id);
+
+            -- The server's VAPID identity (decision 161, AM125, RFC 8292):
+            -- one row, like `server`. Only the public half — the private
+            -- key is a file, protected the same way the server's own
+            -- identity key is (`identity::write_key_file`), and
+            -- deliberately its own table rather than a `server_credentials`
+            -- row: that table's "exactly one active" invariant
+            -- (`active_credential_count`) is unrelated to this key and must
+            -- not be made to count it.
+            CREATE TABLE IF NOT EXISTS vapid_keypair (
+                only_row   INTEGER PRIMARY KEY CHECK (only_row = 1),
+                key_id     TEXT NOT NULL,
+                public_key BLOB NOT NULL,
+                created    TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -513,6 +587,38 @@ impl AuthDb {
             [],
             |r| r.get(0),
         )?)
+    }
+
+    // ---- VAPID identity (decision 161, AM125) ----------------------------
+
+    pub fn vapid_keypair(&self) -> Result<Option<VapidKeypairRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT key_id, public_key, created FROM vapid_keypair WHERE only_row = 1",
+                [],
+                |r| {
+                    Ok(VapidKeypairRow {
+                        key_id: r.get(0)?,
+                        public_key: r.get(1)?,
+                        created: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn insert_vapid_keypair(
+        &mut self,
+        key_id: &str,
+        public_key: &[u8],
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO vapid_keypair (only_row, key_id, public_key, created) VALUES (1, ?1, ?2, ?3)",
+            params![key_id, public_key, now],
+        )?;
+        Ok(())
     }
 
     /// Appends to the audit trail.
@@ -910,6 +1016,10 @@ mod tests {
             "sessions",
             "users",
             "ws_tickets",
+            "device_notification_prefs",
+            "push_endpoints",
+            "push_deliveries",
+            "vapid_keypair",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -1128,6 +1238,66 @@ mod tests {
             crate::auth::keys::authenticate(&mut db, &secret, "2026-01-02T00:00:00Z").is_ok(),
             "a key minted on an upgraded database must authenticate"
         );
+    }
+
+    #[test]
+    fn a_v0_19_0_database_gains_push_tables_and_keeps_its_devices() {
+        // Decision 161, slice 161-6: `push_endpoints`, `push_deliveries` and
+        // `vapid_keypair` are purely additive, the same shape as 161-4's
+        // `device_notification_prefs` before it — they come from the
+        // `CREATE TABLE IF NOT EXISTS` batch, never from a version-gated
+        // migration branch. This builds a v0.19.0-shaped database (every
+        // table through 161-1..161-R1, none of 161-6's three) by hand,
+        // then asserts the upgrade adds them without disturbing a device
+        // that was already paired.
+        let dir = tempdir::TempDir::new("storm-auth-mig-161-6").unwrap();
+        let device_id = {
+            let mut db = AuthDb::open(dir.path()).unwrap();
+            let device = crate::auth::devices::create_synthetic(
+                &mut db,
+                "pre-161-6 device",
+                "2026-11-17T00:00:00Z",
+            )
+            .unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP TABLE IF EXISTS push_endpoints;
+                     DROP TABLE IF EXISTS push_deliveries;
+                     DROP TABLE IF EXISTS vapid_keypair;",
+                )
+                .unwrap();
+            device.id
+        };
+
+        let db = AuthDb::open(dir.path()).unwrap();
+        let names = table_names(&db);
+        for expected in ["push_endpoints", "push_deliveries", "vapid_keypair"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "a v0.19.0 database must gain `{expected}`; have {names:?}"
+            );
+        }
+        // The device paired before the upgrade is still there — the same
+        // "must not lose unrebuildable state" check every additive
+        // migration in this file carries.
+        assert!(db.find_device(&device_id).unwrap().is_some());
+
+        // And the new tables are usable immediately, FKs included: a
+        // revoke on the carried-over device still reaches a push endpoint
+        // registered after the upgrade.
+        let mut db = db;
+        let endpoint = db
+            .upsert_push_endpoint(
+                &device_id,
+                "webpush",
+                "https://push.example.net/sub/mig",
+                "p256dh",
+                b"sealed",
+                "2026-11-21T00:00:00Z",
+            )
+            .unwrap();
+        crate::auth::devices::revoke(&mut db, &device_id, "test", "2026-11-21T00:00:01Z").unwrap();
+        assert!(db.push_endpoint(&endpoint.id).unwrap().is_none());
     }
 
     #[test]
