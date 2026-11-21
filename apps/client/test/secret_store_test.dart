@@ -7,10 +7,12 @@ import 'package:storm/state/secret_store.dart';
 
 /// Getting the credentials out of `shared_preferences`, and keeping them out.
 ///
-/// Two things carry this: the migration has to move an existing install's
+/// Three things carry this: the migration has to move an existing install's
 /// secrets across *and erase the originals* — a copy left behind means the
-/// change was cosmetic — and a platform with no reachable keychain has to
-/// degrade rather than lock someone out of their own notes.
+/// change was cosmetic — a platform with no reachable keychain has to
+/// degrade rather than lock someone out of their own notes — and, since the
+/// fix for repeated macOS keychain prompts, every credential has to collapse
+/// into one keychain item rather than one per credential.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -165,6 +167,104 @@ void main() {
     });
   });
 
+  group('collapsing into one keychain item', () {
+    const blobKey = 'storm.credentials';
+
+    test('migrates the old per-item keychain layout once, deletes it, and '
+        'writes a single blob', () async {
+      final prefs = await prefsWith({});
+      final keychain = _CountingKeychain({
+        deviceSecret: 'dev-secret',
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+      });
+
+      final loaded = await SecretStore(secure: keychain).load(prefs);
+
+      expect(loaded[deviceSecret], 'dev-secret');
+      expect(loaded[accessToken], 'access-1');
+      expect(loaded[refreshToken], 'refresh-1');
+      expect(keychain.writes[blobKey], 1);
+      for (final key in secretKeys) {
+        expect(keychain.reads[key], 1, reason: '$key read more than once');
+        expect(keychain.deletes[key], 1, reason: '$key never erased');
+      }
+
+      // The blob exists now, so a second load never touches a legacy item.
+      final again = await SecretStore(secure: keychain).load(prefs);
+      expect(again[refreshToken], 'refresh-1');
+      for (final key in secretKeys) {
+        expect(
+          keychain.reads[key],
+          1,
+          reason: '$key re-read after migration finished',
+        );
+      }
+    });
+
+    test('also erases the pre-cutover storm.token item', () async {
+      final prefs = await prefsWith({});
+      final keychain = _CountingKeychain({
+        accessToken: 'access-1',
+        'storm.token': 'shared-token',
+      });
+
+      await SecretStore(secure: keychain).load(prefs);
+
+      expect(keychain.deletes['storm.token'], 1);
+    });
+
+    test(
+      'a fresh install writes nothing until there is something to save',
+      () async {
+        final prefs = await prefsWith({});
+        final keychain = _CountingKeychain();
+
+        final loaded = await SecretStore(secure: keychain).load(prefs);
+
+        expect(loaded.values.every((v) => v.isEmpty), isTrue);
+        expect(keychain.writes, isEmpty);
+      },
+    );
+
+    test('saving the same values again never touches the keychain', () async {
+      final prefs = await prefsWith({});
+      final keychain = _CountingKeychain();
+      final store = SecretStore(secure: keychain);
+      final values = {accessToken: 'access-1', refreshToken: 'refresh-1'};
+
+      await store.save(prefs, values);
+      expect(keychain.writes[blobKey], 1);
+
+      await store.save(prefs, values);
+      expect(
+        keychain.writes[blobKey],
+        1,
+        reason: 'saving identical values wrote the keychain a second time',
+      );
+    });
+
+    test(
+      'signing out deletes the blob rather than writing empty strings',
+      () async {
+        final prefs = await prefsWith({});
+        final keychain = _CountingKeychain();
+        final store = SecretStore(secure: keychain);
+        await store.save(prefs, {
+          deviceSecret: 'd',
+          accessToken: 'a',
+          refreshToken: 'r',
+        });
+
+        await store.clear(prefs);
+
+        expect(keychain.deletes[blobKey], 1);
+        final reloaded = await SecretStore(secure: keychain).load(prefs);
+        expect(reloaded.values.every((v) => v.isEmpty), isTrue);
+      },
+    );
+  });
+
   group('when the keychain cannot be reached', () {
     test('reading falls back to prefs rather than losing access', () async {
       // A Linux box with no libsecret is the real case. Refusing to start
@@ -315,6 +415,64 @@ class _FileKeychain extends FlutterSecureStorage {
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
   }) async {
+    _items.remove(key);
+  }
+}
+
+/// Counts calls per key, to prove migration reads and erases a legacy item
+/// exactly once, and that an unchanged `save()` never writes the keychain.
+class _CountingKeychain extends FlutterSecureStorage {
+  _CountingKeychain([Map<String, String>? seed]) : _items = {...?seed};
+
+  final Map<String, String> _items;
+  final Map<String, int> reads = {};
+  final Map<String, int> writes = {};
+  final Map<String, int> deletes = {};
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    reads[key] = (reads[key] ?? 0) + 1;
+    return _items[key];
+  }
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    writes[key] = (writes[key] ?? 0) + 1;
+    if (value == null) {
+      _items.remove(key);
+    } else {
+      _items[key] = value;
+    }
+  }
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    deletes[key] = (deletes[key] ?? 0) + 1;
     _items.remove(key);
   }
 }

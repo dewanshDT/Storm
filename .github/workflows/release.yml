@@ -713,11 +713,69 @@ jobs:
             --build-name="${GITHUB_REF_NAME#v}" \
             --build-number="${GITHUB_RUN_NUMBER}" \
             --dart-define=STORM_CHANNEL=${{ needs.channel.outputs.channel }}
+          test -d "build/macos/Build/Products/Release/Storm.app"
+      # Ad-hoc signing's designated requirement is the build's own cdhash, so
+      # every release is a new code identity and the keychain's "Always
+      # Allow" (a file-based-keychain ACL keyed to that identity) resets on
+      # every update — the macOS app re-asks for the login password on
+      # launch. With a real signing certificate the identity is stable
+      # across releases, so the ACL survives. Falls back to the plain
+      # ad-hoc build when the secrets are not set.
+      - name: Sign with a stable identity, when one is configured
+        working-directory: apps/client
+        env:
+          SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -eu
+          APP="build/macos/Build/Products/Release/Storm.app"
+          if [ -z "$SIGNING_P12" ] || [ -z "$SIGNING_P12_PASSWORD" ]; then
+            echo "::warning::No macOS signing secrets (MACOS_SIGNING_P12, MACOS_SIGNING_P12_PASSWORD): the app stays ad-hoc signed, so its designated requirement is this build's cdhash and the keychain re-prompts on every release."
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/storm-app-signing.keychain-db"
+          kcpw=$(openssl rand -hex 16)
+          echo "STORM_APP_SIGNING_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$SIGNING_P12" | base64 --decode >"$RUNNER_TEMP/storm-app-signing.p12"
+          security import "$RUNNER_TEMP/storm-app-signing.p12" -k "$kc" -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/storm-app-signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+
+          IDENTITY="Storm App Signing"
+          ENTITLEMENTS="macos/Runner/Release.entitlements"
+          # --deep alone is not relied on: sign nested frameworks and dylibs
+          # first, then the app, so a part --deep's own traversal misses is
+          # still caught by the --verify --deep --strict check below.
+          find "$APP/Contents/Frameworks" -type d -name '*.framework' -print0 2>/dev/null \
+            | xargs -0 -I{} codesign --force --sign "$IDENTITY" --timestamp=none "{}"
+          find "$APP/Contents/Frameworks" -type f -name '*.dylib' -print0 2>/dev/null \
+            | xargs -0 -I{} codesign --force --sign "$IDENTITY" --timestamp=none "{}"
+          # No hardened runtime (--options runtime): the app is still
+          # unnotarized, and the runtime would only add Gatekeeper friction
+          # notarization is needed to clear.
+          codesign --force --deep --sign "$IDENTITY" \
+            --entitlements "$ENTITLEMENTS" --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dr - "$APP"
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [ -n "${STORM_APP_SIGNING_KEYCHAIN:-}" ] && [ -f "$STORM_APP_SIGNING_KEYCHAIN" ]; then
+            security delete-keychain "$STORM_APP_SIGNING_KEYCHAIN"
+          fi
+      - name: Package
+        working-directory: apps/client
+        run: |
           mkdir -p dist
           APP="build/macos/Build/Products/Release/Storm.app"
-          test -d "$APP"
-          # Ad-hoc signed and unnotarized — Gatekeeper will quarantine a
-          # downloaded zip. Documented in the release notes.
+          # Unnotarized either way — Gatekeeper will quarantine a downloaded
+          # zip whether the app above got a stable identity or stayed
+          # ad-hoc. Documented in the release notes.
           ditto -c -k --sequesterRsrc --keepParent "$APP" \
             "dist/Storm-${GITHUB_REF_NAME#v}-macos-arm64.zip"
       - uses: actions/upload-artifact@v4
@@ -923,16 +981,18 @@ jobs:
           the same host as a LaunchDaemon under its own \`_stormruntime\` account:
           \`sudo ./storm-runtime install\`, then enroll. Or with Homebrew:
           \`brew tap dewanshdt/storm https://github.com/dewanshDT/Storm\` and
-          \`brew install storm-runtime\`. Ad-hoc signed and not notarized, like
-          the app. Setup is in \`deploy/README.md\` under "Runtime Hosts" > "macOS".
+          \`brew install storm-runtime\`. Ad-hoc signed and not notarized.
+          Setup is in \`deploy/README.md\` under "Runtime Hosts" > "macOS".
 
           **Linux app:** \`storm-app_${VERSION}-1_amd64.deb\` (Debian and Ubuntu,
           also from the apt repository: \`sudo apt install storm-app\`) or
           \`storm-app-${VERSION}-x86_64-linux.tar.gz\` for any distribution.
           The installer's \`--app\` picks the right one.
 
-          **macOS:** the zip is ad-hoc signed and not notarized. Gatekeeper will
-          quarantine a downloaded copy (arm64 only on \`macos-latest\`).
+          **macOS:** signed with a stable identity when the repository's
+          signing secrets are configured, ad-hoc otherwise; not notarized
+          either way, so Gatekeeper will quarantine a downloaded copy
+          (arm64 only on \`macos-latest\`).
 
           **Android:** requires the upload keystore secrets for upgradeable
           installs; without them this APK is debug-signed.
