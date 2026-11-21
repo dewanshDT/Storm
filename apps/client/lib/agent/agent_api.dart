@@ -820,6 +820,51 @@ class AgentApi {
         as Map<String, dynamic>,
   );
 
+  // ---- closed-app push (decision 161, slice 161-6/161-8) -----------------
+
+  /// `GET /v1/push/vapid`: the server's VAPID public key, base64url — what
+  /// a UnifiedPush `register(vapid: …)` or a browser's
+  /// `PushManager.subscribe({applicationServerKey: …})` wants.
+  Future<String> pushVapidPublicKey() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/push/vapid'), headers: _headers),
+    );
+    return (json as Map)['public_key'] as String;
+  }
+
+  /// `POST /v1/push/endpoints`: registers (or replaces, on a re-subscribe
+  /// of the same URL) this device's own push subscription. [endpoint] must
+  /// be `https://`.
+  Future<PushEndpointRegistration> registerPushEndpoint({
+    required String kind,
+    required String endpoint,
+    required String p256dh,
+    required String auth,
+  }) async => PushEndpointRegistration.fromJson(
+    _decode(
+          await _client.post(
+            _uri('/v1/push/endpoints'),
+            headers: _headers,
+            body: jsonEncode({
+              'kind': kind,
+              'endpoint': endpoint,
+              'keys': {'p256dh': p256dh, 'auth': auth},
+            }),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  /// `DELETE /v1/push/endpoints/{id}`: this device's own endpoint only.
+  Future<void> deletePushEndpoint(String id) async {
+    _decode(
+      await _client.delete(
+        _uri('/v1/push/endpoints/${Uri.encodeComponent(id)}'),
+        headers: _headers,
+      ),
+    );
+  }
+
   /// `GET /v1/notifications/devices`: every paired device's row, read-only.
   Future<List<NotificationDeviceRow>> notificationDevices() async {
     final json = _decode(

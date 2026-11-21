@@ -13,6 +13,12 @@
          holds a multicast lock, so without this the "On this network" list
          stays empty. The lock is held only while the pairing screen is open. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <!-- Decision 161, slice 161-8: Android 13+ (API 33) gates every local
+         or push-triggered notification behind this runtime permission.
+         `flutter_local_notifications` already declares it in its own
+         manifest (merged in automatically); it is repeated here, explicit,
+         for the same reason INTERNET above is. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="Storm"
         android:name="${applicationName}"

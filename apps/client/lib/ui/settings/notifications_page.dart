@@ -14,6 +14,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../agent/agent_api.dart' show AgentRefusal;
 import '../../agent/agent_models.dart' show providerLabel;
@@ -26,6 +27,7 @@ import '../../agent/notifications_models.dart';
 import '../../agent/notifications_state.dart';
 import '../../agent/ntfy_topic.dart';
 import '../../agent/this_device_local_prefs.dart';
+import '../../agent/unified_push.dart';
 import '../../agent/web_notifications.dart';
 import '../clipboard_copy.dart';
 import '../controls.dart';
@@ -897,10 +899,14 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
     // is the host OS even under `kIsWeb`, never a "web" value of its own)
     // would read wrong on at least one of the two.
     if (kIsWeb) return const _ThisDeviceWebSection();
-    // 161-9: Android and iOS have no OS notification path of their own
-    // yet (`flutter_local_notifications` on Android is explicitly out of
-    // this slice) — rather than show nothing, as before, say so plainly
-    // and point at ntfy, which does work when the app is closed.
+    // 161-8, building on 161-9's own mobile section rather than replacing
+    // it: Android gets the real thing (UnifiedPush, device-specific,
+    // end-to-end encrypted), aware of the account-wide ntfy sink as a
+    // fallback/complement; iOS has neither OS path yet, so it keeps
+    // 161-9's plain "set up ntfy" section unchanged.
+    if (isAndroidPlatform) {
+      return _ThisDeviceAndroidSection(ntfySectionKey: widget.ntfySectionKey);
+    }
     if (!isDesktopPlatform) {
       return _ThisDeviceMobileSection(ntfySectionKey: widget.ntfySectionKey);
     }
@@ -1335,6 +1341,279 @@ class _ThisDeviceWebSectionState extends ConsumerState<_ThisDeviceWebSection> {
       : kDeviceNotificationClasses.where(prefs.classOn).length;
 
   List<String> _withWebClass(
+    DeviceNotificationPrefs prefs,
+    String kind,
+    bool on,
+  ) {
+    final current = prefs.classes.isEmpty
+        ? List<String>.from(kDeviceNotificationClasses)
+        : List<String>.from(prefs.classes);
+    if (on) {
+      if (!current.contains(kind)) current.add(kind);
+    } else {
+      current.remove(kind);
+    }
+    return current;
+  }
+}
+
+/// Android closed-app push (decision 161, slice 161-8): UnifiedPush, with
+/// ntfy as the distributor Storm tells people to install. Builds on
+/// [_ThisDeviceMobileSection]'s own delivery row rather than replacing it
+/// (161-9 shipped first): the account-wide ntfy sink below still reaches
+/// this device with no setup here at all, so the Delivery row and this
+/// section's own "Set up ntfy" fallback both still apply when UnifiedPush
+/// itself isn't on. Its own section rather than a branch of
+/// [_ThisDeviceSectionState] — the distributor pick, the install-ntfy
+/// state and the permission flow have no desktop or web equivalent, same
+/// reasoning as [_ThisDeviceWebSection].
+class _ThisDeviceAndroidSection extends ConsumerStatefulWidget {
+  const _ThisDeviceAndroidSection({required this.ntfySectionKey});
+
+  final GlobalKey ntfySectionKey;
+
+  @override
+  ConsumerState<_ThisDeviceAndroidSection> createState() =>
+      _ThisDeviceAndroidSectionState();
+}
+
+class _ThisDeviceAndroidSectionState
+    extends ConsumerState<_ThisDeviceAndroidSection> {
+  void _scrollToNtfy(BuildContext context) {
+    final target = widget.ntfySectionKey.currentContext;
+    if (target != null) {
+      unawaited(
+        Scrollable.ensureVisible(
+          target,
+          duration: const Duration(milliseconds: 300),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final deviceState = ref.watch(deviceNotificationPrefsProvider);
+    final local = ref.watch(thisDeviceLocalPrefsProvider);
+    final push = ref.watch(unifiedPushControllerProvider);
+    final viaNtfy =
+        ref.watch(notificationsStateProvider)?.prefs?.ntfyEnabled ?? false;
+    if (deviceState == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: Listenable.merge([deviceState, local, ?push]),
+      builder: (context, _) =>
+          _body(context, deviceState, local, push, viaNtfy),
+    );
+  }
+
+  /// "Build on its Android delivery row": a working UnifiedPush
+  /// registration wins (it's this device's own, richer and encrypted to
+  /// it alone); short of that, the account-wide ntfy sink already
+  /// reaching this device is real delivery too, same wording
+  /// [_ThisDeviceMobileSection] uses for it.
+  String _deliveryLabel(
+    DeviceNotificationPrefs prefs,
+    UnifiedPushController? push,
+    bool viaNtfy,
+  ) {
+    final pushOn = push?.status == UnifiedPushStatus.on;
+    if (pushOn) {
+      final via = 'Push via ${push?.distributorLabel ?? "a distributor"}';
+      final health = prefs.push;
+      if (health == null || health.failures == 0) return '$via · working';
+      return health.lastOk == null
+          ? '$via · never delivered (${health.failures} failed)'
+          : '$via · ${health.failures} failed since its last delivery';
+    }
+    if (viaNtfy) return 'Via ntfy (account-wide)';
+    return 'Only inside the app while it\'s open';
+  }
+
+  Future<void> _install(String url) async {
+    unawaited(launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication));
+  }
+
+  Widget _body(
+    BuildContext context,
+    DeviceNotificationPrefsState deviceState,
+    ThisDeviceLocalPrefs local,
+    UnifiedPushController? push,
+    bool viaNtfy,
+  ) {
+    final t = context.tokens;
+    final prefs = deviceState.prefs;
+    final status = push?.status ?? UnifiedPushStatus.unavailable;
+    final on = status == UnifiedPushStatus.on;
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const GroupLabel('This device', bottom: 10),
+          SettingsRow(
+            key: const Key('device-notify-enabled'),
+            label: 'Notifications on this device',
+            sub: status == UnifiedPushStatus.enabling ? 'Enabling…' : null,
+            trailing: on
+                ? StormToggle(
+                    value: true,
+                    onChanged: (v) {
+                      if (!v) unawaited(push?.disable());
+                    },
+                  )
+                : StormButton.outline(
+                    key: const Key('android-enable-notifications'),
+                    label: status == UnifiedPushStatus.enabling
+                        ? 'Enabling…'
+                        : 'Enable notifications',
+                    onPressed: status == UnifiedPushStatus.enabling
+                        ? null
+                        : () => unawaited(push?.enable()),
+                  ),
+          ),
+          SettingsRow(
+            // Same key 161-9's own mobile delivery row uses
+            // (`_ThisDeviceMobileSection`) — this row fills the identical
+            // role for Android, just with a real push state to report
+            // once one exists, so a test or a person looking for "the
+            // delivery row" finds the same name either way.
+            key: const Key('device-delivery-mobile'),
+            label: 'Delivery',
+            sub: _deliveryLabel(prefs, push, viaNtfy),
+            trailing: on || viaNtfy
+                ? null
+                : TextAction(
+                    key: const Key('device-set-up-ntfy'),
+                    label: 'Set up ntfy',
+                    onTap: () => _scrollToNtfy(context),
+                  ),
+          ),
+          if (status == UnifiedPushStatus.distributorMissing)
+            SettingsRow(
+              label: 'No push app installed',
+              sub:
+                  'Install ntfy to get notifications when Storm is closed. '
+                  'Open it once after installing, then try Enable again.',
+              trailing: Wrap(
+                spacing: t.sp,
+                children: [
+                  TextAction(
+                    key: const Key('android-install-ntfy-play'),
+                    label: 'Play Store',
+                    onTap: () => unawaited(
+                      _install(
+                        'https://play.google.com/store/apps/details?id=io.heckel.ntfy',
+                      ),
+                    ),
+                  ),
+                  TextAction(
+                    key: const Key('android-install-ntfy-fdroid'),
+                    label: 'F-Droid',
+                    onTap: () => unawaited(
+                      _install('https://f-droid.org/packages/io.heckel.ntfy/'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (status == UnifiedPushStatus.permissionDenied)
+            SettingsRow(
+              label: 'Notifications are blocked',
+              sub: 'Blocked in Android settings.',
+              trailing: TextAction(
+                key: const Key('android-open-system-settings'),
+                label: 'Open system settings',
+                onTap: () => unawaited(push?.openSystemSettings()),
+              ),
+            ),
+          if (status == UnifiedPushStatus.error)
+            SettingsRow(
+              label: 'Could not enable notifications',
+              sub: push?.errorMessage ?? 'Something went wrong — try again.',
+            ),
+          if (on) ...[
+            SettingsRow(
+              label: 'Show',
+              divider: false,
+              trailing: ChoiceChips<String>(
+                key: const Key('device-preview'),
+                options: [
+                  for (final level in kDevicePreviewLevels)
+                    ChoiceOption(level, _kPreviewLabels[level] ?? level),
+                ],
+                selected: prefs.preview,
+                onSelected: (v) =>
+                    _guard(context, () => deviceState.setPreview(v)),
+              ),
+            ),
+            SizedBox(height: t.sp * 1.5),
+            GroupLabel('Send to this device', top: t.sp),
+            for (final kind in kDeviceNotificationClasses)
+              SettingsRow(
+                label: _kDeviceClassLabels[kind] ?? kind,
+                sub: prefs.classOn(kind) && _onAndroidClassCount(prefs) <= 1
+                    ? 'Use "Notifications on this device" to turn off the last one'
+                    : null,
+                divider: kind != kDeviceNotificationClasses.last,
+                trailing: StormToggle(
+                  key: Key('device-class-$kind'),
+                  value: prefs.classOn(kind),
+                  enabled:
+                      !(prefs.classOn(kind) &&
+                          _onAndroidClassCount(prefs) <= 1),
+                  onChanged: (v) => _guard(
+                    context,
+                    () => deviceState.setClasses(
+                      _withAndroidClass(prefs, kind, v),
+                    ),
+                  ),
+                ),
+              ),
+            SizedBox(height: t.sp * 1.5),
+            SettingsRow(
+              label: 'Sound',
+              divider: false,
+              trailing: StormToggle(
+                key: const Key('device-sound'),
+                value: local.soundOn,
+                onChanged: (v) => local.setSoundOn(v),
+              ),
+            ),
+            SizedBox(height: t.sp * 1.5),
+            SettingsButtonRow(
+              child: StormButton.outline(
+                key: const Key('device-send-test'),
+                label: 'Send a test notification',
+                onPressed: () async {
+                  try {
+                    final n = await deviceState.sendTest();
+                    unawaited(push?.forceShow(n, deviceState.prefs));
+                    if (context.mounted) {
+                      settingsToast(context, 'Sent — check this device.');
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      settingsToast(context, describeFailure(e));
+                    }
+                  }
+                },
+              ),
+            ),
+          ],
+          SizedBox(height: t.sp * 3),
+          const SettingsDivider(),
+          SizedBox(height: t.sp * 1.5),
+        ],
+      ),
+    );
+  }
+
+  int _onAndroidClassCount(DeviceNotificationPrefs prefs) =>
+      prefs.classes.isEmpty
+      ? kDeviceNotificationClasses.length
+      : kDeviceNotificationClasses.where(prefs.classOn).length;
+
+  List<String> _withAndroidClass(
     DeviceNotificationPrefs prefs,
     String kind,
     bool on,

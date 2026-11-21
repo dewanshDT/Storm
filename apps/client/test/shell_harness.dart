@@ -17,6 +17,8 @@ import 'package:storm/agent/integrations_screen.dart'
 import 'package:storm/agent/oauth_links.dart';
 import 'package:storm/agent/session_keep_alive.dart';
 import 'package:storm/agent/terminal_events.dart';
+import 'package:storm/agent/unified_push.dart'
+    show UnifiedPushController, unifiedPushControllerProvider;
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_connection.dart';
 import 'package:storm/api/storm_api.dart';
@@ -78,6 +80,12 @@ ProviderContainer shellContainer({
   // The compiled default (`flutter test` passes no `--dart-define`), so a
   // suite that wants the stable branch overrides this explicitly.
   StormChannel channel = StormChannel.latest,
+  // 161-8: the real provider is gated on the actual host OS
+  // (`Platform.isAndroid`), which is never true under `flutter test` —
+  // a suite that wants to drive "This device" Android's own states
+  // injects a controller built on a fake backend instead. `null` (the
+  // default) keeps every other suite exactly as it already was.
+  UnifiedPushController? unifiedPush,
 }) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
@@ -170,6 +178,7 @@ ProviderContainer shellContainer({
       // No suite browses the real network; LAN discovery has its own tests.
       lanBrowserFactoryProvider.overrideWithValue(FakeLanBrowser.new),
       oauthSupportedProvider.overrideWithValue(true),
+      unifiedPushControllerProvider.overrideWithValue(unifiedPush),
     ],
   );
   _servers[container] = server;

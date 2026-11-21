@@ -63,4 +63,18 @@ void main() {
       reason: 'the permission must actually be declared',
     );
   });
+
+  test('the main manifest grants POST_NOTIFICATIONS (decision 161-8)', () {
+    // Android 13+ refuses every notification, local or push-triggered,
+    // without this. `flutter_local_notifications` also declares it in its
+    // own manifest (merged in automatically either way), but a plugin's
+    // manifest is exactly the kind of place this would go unnoticed if
+    // Storm's own copy here were ever quietly dropped.
+    expect(
+      RegExp(
+        r'<uses-permission\s+android:name="android\.permission\.POST_NOTIFICATIONS"\s*/>',
+      ).hasMatch(text),
+      isTrue,
+    );
+  });
 }

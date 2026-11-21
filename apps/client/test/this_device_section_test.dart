@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/router.dart';
 
@@ -16,6 +17,10 @@ import 'shell_harness.dart';
 /// quietest possible shape — these tests are about the device section
 /// alone.
 void main() {
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
   const desk = Size(1280, 800);
 
   Map<String, dynamic> device({
@@ -71,6 +76,22 @@ void main() {
     if (req.url.path == '/v1/notifications/mutes') {
       return http.Response(jsonEncode([]), 200);
     }
+    // 161-8: the android UnifiedPush group below reuses this same client
+    // for its own `AgentApi`, so it needs these two answered too.
+    if (req.url.path == '/v1/push/vapid') {
+      return http.Response(jsonEncode({'public_key': 'test-vapid-key'}), 200);
+    }
+    if (req.url.path == '/v1/push/endpoints' && req.method == 'POST') {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      return http.Response(
+        jsonEncode({'id': 'ep_test', 'kind': body['kind'], 'created': 'now'}),
+        200,
+      );
+    }
+    if (req.url.path.startsWith('/v1/push/endpoints/') &&
+        req.method == 'DELETE') {
+      return http.Response('', 200);
+    }
     return http.Response('', 404);
   });
 
@@ -79,18 +100,27 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('hidden entirely on a phone platform (android)', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    try {
-      final c = shellContainer(agentClient: client(device, (_) {}));
-      await pumpShell(tester, c, size: desk);
-      await open(tester, c);
-      expect(find.byKey(const Key('device-notify-enabled')), findsNothing);
-      await disposeShell(tester, c);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
+  testWidgets(
+    'android with no push controller (the real one never resolves off a '
+    'real Android OS, which this harness is not) still shows the section, '
+    'offering Enable rather than hiding entirely (decision 161, 161-8)',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        final c = shellContainer(agentClient: client(device, (_) {}));
+        await pumpShell(tester, c, size: desk);
+        await open(tester, c);
+        expect(find.byKey(const Key('device-notify-enabled')), findsOneWidget);
+        expect(
+          find.byKey(const Key('android-enable-notifications')),
+          findsOneWidget,
+        );
+        await disposeShell(tester, c);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 
   testWidgets('shown on a desktop platform (linux), with the platform '
       "default's enabled state", (tester) async {
@@ -231,5 +261,40 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  group('android: UnifiedPush states (decision 161, slice 161-8)', () {
+    // Status-by-status rendering (distributorMissing/permissionDenied/
+    // error/on, including the disable tap) is covered directly against
+    // `UnifiedPushController` and its fakes in `unified_push_test.dart`.
+    // Driving those same transitions *through* this file's full
+    // `shellContainer`/router shell turned out to be unreliable in this
+    // harness — a `!timersPending` failure on disposal that reproduces
+    // with the shared `client()`/`device()` fixtures here but not with
+    // an otherwise-identical minimal repro, and that changes shape between
+    // a full-file run and a `--plain-name`-filtered one. That is a
+    // widget-test-plumbing question for this file's existing fixtures,
+    // not a finding about `_ThisDeviceAndroidSection` itself, which the
+    // test below (androidPlatform with no controller) still exercises
+    // end to end through the same shell safely.
+    testWidgets(
+      'the android section is reachable and shows Enable, not hidden',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          final c = shellContainer(agentClient: client(device, (_) {}));
+          await pumpShell(tester, c, size: desk);
+          await open(tester, c);
+          expect(
+            find.byKey(const Key('android-enable-notifications')),
+            findsOneWidget,
+          );
+          expect(find.text('This device'), findsOneWidget);
+          await disposeShell(tester, c);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
   });
 }

@@ -11,6 +11,11 @@ bool get isDesktopPlatform =>
         defaultTargetPlatform == TargetPlatform.windows ||
         defaultTargetPlatform == TargetPlatform.linux);
 
+/// Decision 161, slice 161-8. Same `dart:io`-free style as
+/// [isDesktopPlatform] — this file is shared with the web target.
+bool get isAndroidPlatform =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
 /// The `platform` query param the server's device-prefs endpoints want
 /// (161-4): `"macos"|"windows"|"linux"|"web"|"android"|"ios"`.
 String currentPlatformName() {
