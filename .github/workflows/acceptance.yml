@@ -124,10 +124,59 @@ jobs:
             build/macos/Build/Products/Release/Storm.app/Contents/Info.plist)
           echo "CFBundleShortVersionString: $shown"
           test "$shown" = "${RELEASE_VERSION}"
+          test -d "build/macos/Build/Products/Release/Storm.app"
+      # Same stable-identity re-sign as release.yml's macos job, so an
+      # acceptance build prompts for the keychain the same number of times a
+      # release would — mirrored into main as decision 163n requires for
+      # release infrastructure.
+      - name: Sign with a stable identity, when one is configured
+        working-directory: apps/client
+        env:
+          SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -eu
+          APP="build/macos/Build/Products/Release/Storm.app"
+          if [ -z "$SIGNING_P12" ] || [ -z "$SIGNING_P12_PASSWORD" ]; then
+            echo "::warning::No macOS signing secrets (MACOS_SIGNING_P12, MACOS_SIGNING_P12_PASSWORD): the app stays ad-hoc signed, so its designated requirement is this build's cdhash and the keychain re-prompts on every release."
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/storm-app-signing.keychain-db"
+          kcpw=$(openssl rand -hex 16)
+          echo "STORM_APP_SIGNING_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$SIGNING_P12" | base64 --decode >"$RUNNER_TEMP/storm-app-signing.p12"
+          security import "$RUNNER_TEMP/storm-app-signing.p12" -k "$kc" -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/storm-app-signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+
+          IDENTITY="Storm App Signing"
+          ENTITLEMENTS="macos/Runner/Release.entitlements"
+          find "$APP/Contents/Frameworks" -type d -name '*.framework' -print0 2>/dev/null \
+            | xargs -0 -I{} codesign --force --sign "$IDENTITY" --timestamp=none "{}"
+          find "$APP/Contents/Frameworks" -type f -name '*.dylib' -print0 2>/dev/null \
+            | xargs -0 -I{} codesign --force --sign "$IDENTITY" --timestamp=none "{}"
+          codesign --force --deep --sign "$IDENTITY" \
+            --entitlements "$ENTITLEMENTS" --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dr - "$APP"
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [ -n "${STORM_APP_SIGNING_KEYCHAIN:-}" ] && [ -f "$STORM_APP_SIGNING_KEYCHAIN" ]; then
+            security delete-keychain "$STORM_APP_SIGNING_KEYCHAIN"
+          fi
+      - name: Package
+        working-directory: apps/client
+        run: |
           mkdir -p dist
           APP="build/macos/Build/Products/Release/Storm.app"
-          test -d "$APP"
-          # Ad-hoc signed and unnotarized, like a release's.
+          # Unnotarized either way, signed with a stable identity above or
+          # left ad-hoc — Gatekeeper will quarantine a downloaded zip.
           ditto -c -k --sequesterRsrc --keepParent "$APP" \
             "dist/Storm-acceptance-${GITHUB_SHA::7}-macos.zip"
       - uses: actions/upload-artifact@v4
