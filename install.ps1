@@ -1,0 +1,476 @@
+<#
+.SYNOPSIS
+  Installs Storm on Windows: the server, the Runtime Host, the Storm app, or
+  any of them together (decisions 99, 125); or, MCP only, storm-runtime on your
+  PATH for AI apps (decision 105e).
+
+.DESCRIPTION
+  The Windows counterpart of install.sh (decision 84). It downloads the release
+  zips, checks each against the release's checksums.txt, and then:
+
+  - Server: `storm-server up` as you (a logon task, notes in %USERPROFILE%\Storm),
+    after asking, one inbound firewall rule for storm-serverw.exe on Private
+    networks only, never Public or Domain (as administrator; otherwise the
+    command is printed), and a pairing code for your first device when the
+    server has no account yet. Remote access goes through a relay and needs no
+    rule at all (decision 119).
+  - Runtime, by default: `storm-runtime install --user` as you (a logon task
+    that runs the host while you are logged on, your own state in
+    %LOCALAPPDATA%\StormRuntime), then enrollment. No administrator; run it in a
+    PowerShell that is not elevated (decisions 151 E3, E5).
+  - Either way, optionally a first workspace (a folder name or a git URL): in
+    %LOCALAPPDATA%\StormRuntime\state\workspaces as you, in
+    %ProgramData%\StormRuntime\workspaces for the service.
+  - Runtime with -Service: `storm-runtime install` (the StormRuntime service, as
+    administrator), then enrollment: straight from the server on this machine,
+    or by pasting the app's enrollment string at a hidden prompt. It never
+    reaches a command line, the screen or a log. It is also the service with
+    -Server (the host must not run as the account that holds your notes), from
+    an elevated PowerShell, and where the StormRuntime service is installed
+    already.
+  - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
+    PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
+    enrollment, no administrator. With a host you run, nothing is copied: an AI
+    app runs that host's storm-runtime.exe, by its full path.
+  - App: the Storm app in %LOCALAPPDATA%\Programs\Storm\App, with a Start-menu
+    shortcut. No administrator. A running Storm is closed first, never killed.
+
+  Re-running it upgrades. It never deletes notes or workspaces, and sends nothing
+  anywhere but GitHub.
+
+    irm https://dewanshdt.github.io/Storm/install.ps1 | iex
+
+  Or, with options:
+
+    & ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -Workspace scratch
+
+.PARAMETER Server
+  Install the server.
+.PARAMETER Runtime
+  Install the Runtime Host: as you, unless -Service, -Server, an elevated
+  PowerShell or an installed StormRuntime service says otherwise.
+.PARAMETER User
+  Install the Runtime Host as you, a logon task, not as the StormRuntime
+  service. No administrator. Not with -Server: the host's agents would run as
+  the account that holds your notes.
+.PARAMETER Service
+  Install the Runtime Host as the StormRuntime service instead. Needs an
+  elevated PowerShell.
+.PARAMETER Mcp
+  MCP only: put storm-runtime on your PATH for AI apps. No service.
+.PARAMETER App
+  Install the Storm app for you, with a Start-menu shortcut.
+.PARAMETER RemoveApp
+  Remove the Storm app and its shortcut. Its cache and sign-in stay in your
+  profile.
+.PARAMETER Version
+  A release tag such as v0.8.0. Default: the latest release in -Channel.
+.PARAMETER Channel
+  stable (default): the latest release, same as always. latest: the newest
+  release by semver, pre-releases included (decision 163).
+.PARAMETER FromDir
+  Take the zips and checksums.txt from this folder instead of downloading them.
+.PARAMETER Workspace
+  A first workspace for the Runtime Host: a folder name, or a git URL to clone.
+.PARAMETER PasswordStdin
+  Set a new server's account password from stdin (one line), instead of pairing
+  a device first. Never an argument: arguments are visible to other users.
+.PARAMETER NoFirewall
+  Don't add the firewall rule; print the command instead.
+.PARAMETER Yes
+  Ask nothing: install what was chosen, and skip what needs an answer.
+.PARAMETER DryRun
+  Print the plan and change nothing.
+#>
+[CmdletBinding()]
+param(
+    [switch]$Server,
+    [switch]$Runtime,
+    [switch]$User,
+    [switch]$Service,
+    [switch]$Mcp,
+    [switch]$App,
+    [switch]$RemoveApp,
+    [string]$Version,
+    [ValidateSet('stable', 'latest')]
+    [string]$Channel = 'stable',
+    [string]$FromDir,
+    [string]$Workspace,
+    [switch]$PasswordStdin,
+    [switch]$NoFirewall,
+    [switch]$Yes,
+    [switch]$DryRun
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 3
+
+$Repo = 'dewanshDT/Storm'
+$ServerZip = 'storm-server-windows-x86_64.zip'
+$RuntimeZip = 'storm-runtime-windows-x86_64.zip'
+$AppZip = 'storm-app-windows-x86_64.zip'
+$Port = 8484
+$RuleName = 'Storm Server'
+$FirewallPrompt = 'Allow devices on your local network to reach Storm directly? (Faster and more private than going through a relay. Storm stays unreachable from the internet.)'
+
+function Say($text) { Write-Host $text }
+function Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
+# `throw`, never `exit`: run through `irm | iex`, `exit` would close the
+# person's PowerShell window.
+function Fail($text) { throw "storm install: $text" }
+
+function Test-Admin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Ask($question, $default) {
+    if ($Yes) { return $default }
+    $answer = Read-Host "$question [$default]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $default } else { $answer.Trim() }
+}
+
+# Under the MCP connector's folder, so replacing the app never touches it.
+$appDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm\App'
+$appLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Storm.lnk'
+
+# Files in use cannot be replaced, and Storm saves as you type, so asking it to
+# close loses nothing. It is never killed: that could cut a write short.
+function Stop-StormApp {
+    $exe = Join-Path $appDir 'storm.exe'
+    $running = @(Get-Process -Name storm -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
+    if ($running.Count -eq 0) { return }
+    Say 'Closing Storm so it can be replaced.'
+    $running | ForEach-Object { [void]$_.CloseMainWindow() }
+    $running | ForEach-Object {
+        if (-not $_.WaitForExit(15000)) { Fail 'Storm did not close: quit it, then run this again' }
+    }
+}
+
+if ($RemoveApp) {
+    Step 'Removing the Storm app'
+    if ($DryRun) { Say "  remove   : $appDir and $appLink"; return }
+    Stop-StormApp
+    Remove-Item -Recurse -Force $appDir -ErrorAction SilentlyContinue
+    Remove-Item -Force $appLink -ErrorAction SilentlyContinue
+    Say "Removed. Its cache and sign-in are kept in $(Join-Path $env:APPDATA 'dev.storm\Storm')."
+    return
+}
+
+# --- what to install -----------------------------------------------------------
+
+if ($User -and $Service) { Fail '-User and -Service are the two ways to run the Runtime Host: pick one' }
+if ($User -or $Service) { $Runtime = $true }
+
+if (-not $Server -and -not $Runtime -and -not $Mcp -and -not $App) {
+    if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, -Mcp, -App' }
+    Say 'Storm for Windows. What should this machine run?'
+    Say '  1) the server and the Runtime Host'
+    Say '  2) the server only'
+    Say '  3) the Runtime Host only (for a server elsewhere)'
+    Say '  4) MCP only: let AI apps here reach your Storm (no service)'
+    Say '  5) the Storm app only (for a server elsewhere)'
+    switch (Ask 'Choose' '1') {
+        '1' { $Server = $true; $Runtime = $true }
+        '2' { $Server = $true }
+        '3' { $Runtime = $true }
+        '4' { $Mcp = $true }
+        '5' { $App = $true }
+        default { Fail 'choose 1, 2, 3, 4 or 5' }
+    }
+    if ($Server -and -not ((Ask 'Also install the Storm app on this PC? (Y/n)' 'Y') -match '^[nN]')) {
+        $App = $true
+    }
+}
+
+$admin = Test-Admin
+# Decision 151 E5: a new host runs as you; a host installed as the service
+# stays the service, so an upgrade changes nothing.
+$serviceBin = Join-Path $env:ProgramFiles 'StormRuntime\storm-runtime.exe'
+$serviceHost = [bool](Get-Service -Name StormRuntime -ErrorAction SilentlyContinue) -or (Test-Path $serviceBin)
+$userHost = Test-Path (Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe')
+$serviceWhy = '-Service'
+if ($Runtime -and -not $User -and -not $Service) {
+    if ($serviceHost) {
+        $Service = $true; $serviceWhy = 'the StormRuntime service installed here'
+    } elseif ($userHost) {
+        $User = $true
+    } elseif ($Server) {
+        $Service = $true; $serviceWhy = '-Server'
+    } elseif ($admin) {
+        $Service = $true; $serviceWhy = 'an elevated PowerShell'
+    } elseif (-not $Yes) {
+        Say 'How should the Runtime Host run?'
+        Say "  1) as you ($env:USERNAME): a logon task with your CLIs and logins; no administrator"
+        Say '  2) as the StormRuntime service; needs PowerShell as administrator'
+        switch (Ask 'Choose' '1') {
+            '1' { $User = $true }
+            '2' { $Service = $true }
+            default { Fail 'choose 1 or 2' }
+        }
+    } else {
+        $User = $true
+    }
+}
+if ($User -and $Server) {
+    Fail '-User with -Server would run agents as the account that holds your notes: install the Runtime Host as its own service (drop -User)'
+}
+if ($User -and $admin) {
+    Fail '-User installs the Runtime Host as you: run this in a PowerShell that is not elevated'
+}
+if ($Runtime -and -not $User -and -not $admin) {
+    Fail "the Runtime Host runs as the StormRuntime service here ($serviceWhy): run this in PowerShell as administrator"
+}
+
+# A release tag's semver as one comparable number; $null for anything that
+# isn't major.minor.patch (a suffix after - or + is ignored, like ver_key in
+# install.sh).
+function Get-SemVerKey([string]$tag) {
+    $core = $tag.TrimStart('v').Split(@('-', '+'), 2)[0].Split('.')
+    if ($core.Count -lt 3) { return $null }
+    try {
+        [int64]$core[0] * 100000000 + [int64]$core[1] * 10000 + [int64]$core[2]
+    } catch {
+        $null
+    }
+}
+
+if (-not $Version -and -not $FromDir) {
+    if ($Channel -eq 'latest') {
+        # The newest release by semver, pre-releases included (decision 163):
+        # /releases/latest only ever answers the stable line.
+        $releases = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=30"
+        $best = $null
+        $bestKey = -1
+        foreach ($r in $releases) {
+            $key = Get-SemVerKey $r.tag_name
+            if ($null -ne $key -and $key -gt $bestKey) { $bestKey = $key; $best = $r.tag_name }
+        }
+        if (-not $best) { Fail 'no release on the latest channel had a plain semver tag; pass -Version vX.Y.Z' }
+        $Version = $best
+    } else {
+        $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name
+    }
+}
+
+$serverBin = Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-server.exe'
+$runtimeBin = Join-Path $env:ProgramFiles 'StormRuntime\storm-runtime.exe'
+$runtimeState = Join-Path $env:ProgramData 'StormRuntime\state'
+if ($User) {
+    $runtimeBin = Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe'
+    $runtimeState = Join-Path $env:LOCALAPPDATA 'StormRuntime\state'
+}
+$dataState = Join-Path $env:USERPROFILE 'Storm\state'
+$mcpDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm'
+# A host you run has its own storm-runtime.exe: AI apps run that, by its
+# full path, rather than a second copy on PATH.
+$userRuntimeBin = Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe'
+$mcpViaHost = $Mcp -and (($Runtime -and $User) -or (-not $Runtime -and $userHost))
+
+Step "Plan ($(if ($Version) { $Version } else { "from $FromDir" })$(if ($Channel -eq 'latest') { ', latest channel' }))"
+if ($Server) {
+    Say "  server   : $ServerZip, checked; storm-server up as $env:USERNAME (logon task, notes in $env:USERPROFILE\Storm)"
+    Say "  firewall : asks; inbound TCP $Port for storm-serverw.exe, Private networks only $(if (-not $admin) { '(needs administrator: printed instead)' })"
+}
+if ($Runtime -and $User) {
+    Say "  runtime  : $RuntimeZip, checked; storm-runtime install --user (a logon task as $env:USERNAME, no administrator)"
+    Say "  enroll   : paste the enrollment string from the app (hidden)"
+    if ($Workspace) { Say "  workspace: $Workspace, in $(Join-Path $runtimeState 'workspaces')" }
+} elseif ($Runtime) {
+    Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service: $serviceWhy) [administrator]"
+    Say "  enroll   : $(if ($Server) { 'with the server on this machine' } else { 'paste the enrollment string from the app (hidden)' })"
+    if ($Workspace) { Say "  workspace: $Workspace" }
+}
+if ($mcpViaHost) {
+    Say "  mcp      : the Runtime Host's own $userRuntimeBin (nothing copied)"
+} elseif ($Mcp) {
+    Say "  mcp      : $RuntimeZip, checked; storm-runtime.exe into $mcpDir, on your PATH (no service)"
+}
+if ($App) {
+    Say "  app      : $AppZip, checked; into $appDir, a Start-menu shortcut (no administrator)"
+}
+if ($DryRun) { return }
+
+# --- download and check ----------------------------------------------------------
+
+$work = Join-Path ([IO.Path]::GetTempPath()) ("storm-install-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $work | Out-Null
+
+function Fetch($name) {
+    $dest = Join-Path $work $name
+    if ($FromDir) {
+        Copy-Item (Join-Path $FromDir $name) $dest
+    } else {
+        Invoke-WebRequest "https://github.com/$Repo/releases/download/$Version/$name" -OutFile $dest -UseBasicParsing
+    }
+    $dest
+}
+
+$sums = Get-Content (Fetch 'checksums.txt')
+function Checked($name) {
+    $path = Fetch $name
+    $line = $sums | Where-Object { $_ -match "\s\*?$([regex]::Escape($name))$" } | Select-Object -First 1
+    if (-not $line) { Fail "$name is not in checksums.txt" }
+    $want = ($line -split '\s+')[0].ToLower()
+    $got = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLower()
+    if ($want -ne $got) { Fail "$name does not match checksums.txt" }
+    $dir = Join-Path $work ([IO.Path]::GetFileNameWithoutExtension($name))
+    Expand-Archive -Path $path -DestinationPath $dir -Force
+    $dir
+}
+
+# --- the app ---------------------------------------------------------------------
+
+# Before the server, so its first pairing can happen in this app.
+if ($App) {
+    Step 'Storm app'
+    $dir = Checked $AppZip
+    if (-not (Test-Path (Join-Path $dir 'storm.exe'))) { Fail "$AppZip has no storm.exe" }
+    Stop-StormApp
+    if (Test-Path $appDir) { Remove-Item -Recurse -Force $appDir }
+    New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+    Copy-Item -Recurse -Path (Join-Path $dir '*') -Destination $appDir
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($appLink)
+    $link.TargetPath = Join-Path $appDir 'storm.exe'
+    $link.WorkingDirectory = $appDir
+    $link.Description = 'Storm'
+    $link.Save()
+    Say "Installed in $appDir. Open it from the Start menu: Storm."
+}
+
+# --- the server ------------------------------------------------------------------
+
+if ($Server) {
+    Step 'Server'
+    $dir = Checked $ServerZip
+    & (Join-Path $dir 'storm-server.exe') up --port $Port
+    if ($LASTEXITCODE -ne 0) { Fail 'storm-server up failed' }
+    # Decision 119: program-scoped, Storm's port, the Private profile only.
+    $rule = "New-NetFirewallRule -DisplayName '$RuleName' -Direction Inbound -Program '$(Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-serverw.exe')' -Protocol TCP -LocalPort $Port -Profile Private -Action Allow"
+    $allow = -not $NoFirewall -and -not ((Ask "$FirewallPrompt (Y/n)" 'Y') -match '^[nN]')
+    if (-not $allow) {
+        Say "Left the firewall as it is; devices reach Storm through a relay. To allow them directly later, as administrator:`n  $rule"
+    } elseif ($admin) {
+        $existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+        if (-not $existing) {
+            Invoke-Expression $rule | Out-Null
+        } elseif (@($existing | Where-Object { "$($_.Profile)" -ne 'Private' }).Count -gt 0) {
+            # An older or hand-made rule open on Public or Domain networks too.
+            $existing | Set-NetFirewallRule -Profile Private
+            Say "Narrowed the '$RuleName' rule to Private networks only."
+        }
+        Say 'Allowed inbound connections on Private networks only.'
+    } else {
+        Say "So your phone can reach it directly, run once in PowerShell as administrator:`n  $rule"
+    }
+    & $serverBin has-account --state $dataState *> $null
+    if ($LASTEXITCODE -ne 0 -and $PasswordStdin) {
+        $pw = [Console]::In.ReadLine()
+        if ([string]::IsNullOrEmpty($pw)) { Fail '-PasswordStdin: there was no password on stdin' }
+        $pw | & $serverBin passwd --state $dataState --password-stdin
+        $pw = $null
+        if ($LASTEXITCODE -ne 0) { Fail 'setting the account password failed' }
+    } elseif ($LASTEXITCODE -ne 0) {
+        if ($App) {
+            Say "`nPair this PC: open Storm from the Start menu, choose Enter address manually, and paste the storm://pair link below."
+            Say 'Or pair your phone: in the Storm app, add a server and scan the code.'
+        } else {
+            Say "`nPair your first device: in the Storm app, add a server and scan this code."
+        }
+        & $serverBin pair --state $dataState --qr
+        if ($Runtime -and -not $Yes) {
+            # The Runtime Host enrolls with the account the first device creates.
+            Say 'Waiting for the first device to pair (Ctrl+C stops waiting)...'
+            do {
+                Start-Sleep -Seconds 3
+                & $serverBin has-account --state $dataState *> $null
+            } until ($LASTEXITCODE -eq 0)
+        }
+    }
+}
+
+# --- the Runtime Host -----------------------------------------------------------
+
+if ($Runtime) {
+    Step 'Runtime Host'
+    $dir = Checked $RuntimeZip
+    if ($User) {
+        & (Join-Path $dir 'storm-runtime.exe') install --user
+        if ($LASTEXITCODE -ne 0) { Fail 'storm-runtime install --user failed' }
+    } else {
+        & (Join-Path $dir 'storm-runtime.exe') install
+        if ($LASTEXITCODE -ne 0) { Fail 'storm-runtime install failed' }
+    }
+    $as = if ($User) { 'in PowerShell' } else { 'in PowerShell as administrator' }
+
+    if (Test-Path (Join-Path $runtimeState 'host.json')) {
+        Say "Already enrolled; the $(if ($User) { 'host' } else { 'service' }) was upgraded in place."
+    } elseif ($Server -and $(& $serverBin has-account --state $dataState *> $null; $LASTEXITCODE -eq 0)) {
+        # The enrollment string goes from one process to the other through a
+        # pipe, and never reaches a command line, the screen or a log (84e).
+        & $serverBin host-enrollment --state $dataState | & $runtimeBin enroll
+        if ($LASTEXITCODE -ne 0) { Fail 'enrollment failed' }
+    } elseif ($Server) {
+        Say "The server has no account yet. Once a device has paired, enroll, as administrator:"
+        Say "  & `"$serverBin`" host-enrollment --state `"$dataState`" | & `"$runtimeBin`" enroll"
+    } elseif ($Yes) {
+        Say "Enroll it later, $($as):`n  & `"$runtimeBin`" enroll"
+    } else {
+        Say 'In the Storm app: Settings > Agents > Hosts > Enroll a host, and copy the string.'
+        $secret = Read-Host 'Paste the enrollment string' -AsSecureString
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret))
+        $plain | & $runtimeBin enroll
+        $plain = $null
+        if ($LASTEXITCODE -ne 0) { Fail 'enrollment failed' }
+    }
+
+    # A host as you has its own root too, <state>\workspaces (decision 151).
+    $root = Join-Path $env:ProgramData 'StormRuntime\workspaces'
+    if ($User) { $root = Join-Path $runtimeState 'workspaces' }
+    $hasOne = @(Get-ChildItem -Directory $root -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') }).Count -gt 0
+    if (-not $Workspace -and -not $hasOne -and -not $Yes) {
+        $Workspace = Read-Host 'A first workspace: a folder name, or a git URL to clone (Enter skips)'
+    }
+    if ($Workspace) {
+        if ($Workspace -match '^(https?://|git@|ssh://)') {
+            $env:GIT_TERMINAL_PROMPT = '0'
+            git -C $root clone $Workspace
+            if ($LASTEXITCODE -ne 0) { Say "warning: could not clone $Workspace (does it need a login?)" }
+        } elseif ($Workspace -match '^[A-Za-z0-9._ -]+$' -and -not $Workspace.StartsWith('.')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $root $Workspace) | Out-Null
+            Say "Workspace: $(Join-Path $root $Workspace)"
+        } else {
+            Say "warning: $Workspace is neither a folder name nor a git URL; skipped"
+        }
+    }
+    if ($User) {
+        Say "Workspaces are the folders in $root. To add other roots: workspace_roots in $(Join-Path $env:LOCALAPPDATA 'StormRuntime\runtime.toml')."
+    }
+}
+
+# --- MCP only -------------------------------------------------------------------
+
+if ($mcpViaHost) {
+    Step 'MCP connector'
+    & $userRuntimeBin mcp-connect --help *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'this storm-runtime has no mcp-connect: it predates it' }
+    Say "AI apps here run the Runtime Host's own storm-runtime. In an app's MCP config, the command is its full path: $userRuntimeBin"
+    Say 'In the Storm app: Settings > Devices & access > New key shows the line to paste into your AI app.'
+} elseif ($Mcp) {
+    Step 'MCP connector'
+    $dir = Checked $RuntimeZip
+    New-Item -ItemType Directory -Force -Path $mcpDir | Out-Null
+    Copy-Item (Join-Path $dir 'storm-runtime.exe') (Join-Path $mcpDir 'storm-runtime.exe') -Force
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not (($userPath -split ';') -contains $mcpDir)) {
+        [Environment]::SetEnvironmentVariable('Path', ((@($userPath, $mcpDir) | Where-Object { $_ }) -join ';'), 'User')
+        Say 'Added it to your PATH: apps started from now on find storm-runtime.'
+    }
+    & (Join-Path $mcpDir 'storm-runtime.exe') mcp-connect --help *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'this storm-runtime has no mcp-connect: it predates it' }
+    Say 'In the Storm app: Settings > Devices & access > New key shows the line to paste into your AI app.'
+}
+
+Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+Step 'Done'

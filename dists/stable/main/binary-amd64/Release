@@ -1,0 +1,5 @@
+Component: main
+Origin: Storm
+Label: Storm
+Architecture: amd64
+Description: Storm server apt repository — stable (public, fixes only)

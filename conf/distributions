@@ -1,0 +1,15 @@
+Origin: Storm
+Label: Storm
+Codename: stable
+Architectures: amd64
+Components: main
+Description: Storm server apt repository — stable (public, fixes only)
+SignWith: 1A0F95CB41904A38
+
+Origin: Storm
+Label: Storm
+Codename: latest
+Architectures: amd64
+Components: main
+Description: Storm server apt repository — latest (operator's line, all features)
+SignWith: 1A0F95CB41904A38

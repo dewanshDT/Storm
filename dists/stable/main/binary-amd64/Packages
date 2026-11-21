@@ -1,0 +1,79 @@
+Package: storm-app
+Version: 0.18.1-1
+Architecture: amd64
+Maintainer: Dewansh Singh Thakur <dewansh.dt@gmail.com>
+Installed-Size: 37952
+Depends: libgtk-3-0t64 | libgtk-3-0, libsecret-1-0
+Recommends: avahi-daemon
+Suggests: gnome-keyring
+Homepage: https://github.com/dewanshDT/Storm
+Priority: optional
+Section: misc
+Filename: pool/main/s/storm-app/storm-app_0.18.1-1_amd64.deb
+Size: 13000494
+SHA256: e53999f862daf7ab3dac13d47aad83667b8fd5d866d0ae4b6604c69c0b13e9c7
+SHA1: 03cc85808ac3b61bee9be1c811ff9dd0f822a1e9
+MD5sum: 1e7c2f88cae5163524adebbda8057bf7
+Description: Storm desktop app
+ The Storm app for Linux: your notes and agent sessions, synced with your
+ Storm server. It does not include the server (storm-server) and needs none
+ on this machine.
+
+Package: storm-relay
+Version: 0.18.1-1
+Architecture: amd64
+Homepage: https://github.com/dewanshDT/Storm
+Maintainer: Dewansh Singh Thakur <dewansh.dt@gmail.com>
+Installed-Size: 5008
+Depends: 
+Priority: optional
+Section: net
+Filename: pool/main/s/storm-relay/storm-relay_0.18.1-1_amd64.deb
+Size: 1746508
+SHA256: 1c8eee1c3e29e9b860585bdc1407aa0bfba5a6011be87020a1bd1e70602220f7
+SHA1: 18664e4b46167a20a6d24987c077f09db8d6339f
+MD5sum: 5c18a273cf7dfe866009418cfd2d1ddd
+Description: Storm Relay Protocol v1 — a reverse proxy routed by server_id
+ Storm Relay Protocol v1 relay: a reverse proxy routed by server_id that lets
+ Storm clients reach a storm-server from outside its network. Optional. Holds no
+ user data and authenticates no clients.
+
+Package: storm-runtime
+Version: 0.18.1-1
+Architecture: amd64
+Homepage: https://github.com/dewanshDT/Storm
+Maintainer: Dewansh Singh Thakur <dewansh.dt@gmail.com>
+Installed-Size: 12544
+Depends: 
+Recommends: passt
+Priority: optional
+Section: devel
+Filename: pool/main/s/storm-runtime/storm-runtime_0.18.1-1_amd64.deb
+Size: 3885912
+SHA256: cca751aabb17323abb9b0e107c0134d86af130292abe6bbcd6824b4f3852340a
+SHA1: aa3df86c5dfd2829f40e9b4429c0d19701be9e0e
+MD5sum: 85405df83bcb851e8d1e80567fb232e9
+Description: Storm Runtime Host — the execution plane that runs agent sessions
+ Storm Runtime Host: runs agent sessions (Claude Code, OpenCode, a shell) in
+ workspaces on this machine for one Storm Server, which it dials out to. Holds
+ no user data and never learns who owns a session.
+
+Package: storm-server
+Version: 0.18.1-1
+Architecture: amd64
+Homepage: https://github.com/dewanshDT/Storm
+Maintainer: Dewansh Singh Thakur <dewansh.dt@gmail.com>
+Installed-Size: 70664
+Depends: 
+Priority: optional
+Section: utils
+Filename: pool/main/s/storm-server/storm-server_0.18.1-1_amd64.deb
+Size: 15705212
+SHA256: 5e1ea2fb687c9ed8fcba9a5888bc9570131c582b5201f453818c5d29c6fdedab
+SHA1: 0bc4e916e7cd9b9f65fa27efaa76959a53b41d23
+MD5sum: 8721071f038ea2e920ac4197877d40c3
+Description: Self-hosted markdown notes sync server
+ Storm sync server: owns canonical markdown vaults, merges concurrent edits, and
+ serves the Flutter web client. Install the package, then run `sudo storm-server
+ up` to enable the systemd unit.
+

@@ -1,0 +1,19 @@
+Origin: Storm
+Label: Storm
+Codename: latest
+Date: Sat, 21 Nov 2026 18:56:20 UTC
+Architectures: amd64
+Components: main
+Description: Storm server apt repository — latest (operator's line, all features)
+MD5Sum:
+ 541667a8558efe300656a2788d229e6f 2988 main/binary-amd64/Packages
+ aefcd984a6e89c99e28236919fcd4257 1299 main/binary-amd64/Packages.gz
+ 8eccf487ef413a828f8ecf5215191bd6 147 main/binary-amd64/Release
+SHA1:
+ 4a306627d88ac5ad0c2e49ab0a6dbf489f6c7c05 2988 main/binary-amd64/Packages
+ d2de4972b5a1793e81579064a55bacbba4c387c9 1299 main/binary-amd64/Packages.gz
+ c3df1593bac11785600a1f86d33360543de3153e 147 main/binary-amd64/Release
+SHA256:
+ e180bea995d273993dbb173720de65a2cc2461e6a1f8b41040beed9e590e4189 2988 main/binary-amd64/Packages
+ 97b6bf974cb0f9f2293ce1fcd1900b45e8392fc8163e695236a11ae8ca19d0d8 1299 main/binary-amd64/Packages.gz
+ ab2688c18ab8a786294b1d951673f2e32de643013f9f9a34b346ebab123f6513 147 main/binary-amd64/Release

@@ -1,0 +1,19 @@
+Origin: Storm
+Label: Storm
+Codename: stable
+Date: Sat, 21 Nov 2026 09:23:59 UTC
+Architectures: amd64
+Components: main
+Description: Storm server apt repository — stable (public, fixes only)
+MD5Sum:
+ bc97cafc48935161978a84f8da36850d 2988 main/binary-amd64/Packages
+ 3c572c6317dd217dcd2fe1a6c767cfd8 1299 main/binary-amd64/Packages.gz
+ aa5b9d00920d1b5633d27b1b25edb33d 136 main/binary-amd64/Release
+SHA1:
+ ff9863951c06af25d9c9a2a6c61e45d8f77dd190 2988 main/binary-amd64/Packages
+ 2215f57357f908123638cf722e4b12a22240c982 1299 main/binary-amd64/Packages.gz
+ d3e9fab97d092e26340959e03b1e061e3811bfc1 136 main/binary-amd64/Release
+SHA256:
+ ee718a1f441f08d5d843df006b787c84ecf5e5dcd8466717e77b26542fdde8d0 2988 main/binary-amd64/Packages
+ 11dc019b03e78da7b3f8faf98606d786a84a90eb4eb6f0a323d16e393afd573b 1299 main/binary-amd64/Packages.gz
+ 36ec87ca4e2a60111a2890de49b75193dea6d3c4d3c522f26487807c40cec38c 136 main/binary-amd64/Release
