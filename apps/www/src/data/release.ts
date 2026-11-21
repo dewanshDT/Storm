@@ -10,8 +10,8 @@
  * "Releases" for which PR bumps which field.
  */
 export const release = {
-  tag: "v0.18.0",
-  latest: null as string | null,
+  tag: "v0.18.1",
+  latest: "v0.19.0" as string | null,
   get version() {
     return this.tag.replace(/^v/, "");
   },
