@@ -1119,8 +1119,14 @@ def main_user():
         os.makedirs(os.path.join(U_WS_ROOT, WS))
         with open(U_CONFIG) as f:
             original = f.read()
+        # install --user already wrote a live workspace_roots (151
+        # follow-up 1): replace it in place rather than prepend another one,
+        # or the file ends up with the key twice ("duplicate key", #466).
+        cfg = re.sub(r"(?m)^workspace_roots\s*=.*$", f'workspace_roots = ["{U_WS_ROOT}"]', original)
+        if cfg == original:
+            cfg = f'workspace_roots = ["{U_WS_ROOT}"]\n' + original
         with open(U_CONFIG, "w") as f:
-            f.write(f'workspace_roots = ["{U_WS_ROOT}"]\n' + original)
+            f.write(cfg)
         _, stubs, real = stub_providers()
 
         print("\n=== U2: enroll as yourself ===")

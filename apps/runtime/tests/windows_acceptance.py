@@ -768,8 +768,16 @@ def user_pass_child(job):
 
         ws_root = os.path.join(WORK, "user-workspaces")
         os.makedirs(os.path.join(ws_root, WS), exist_ok=True)
-        with open(USER_CONFIG, "a") as f:
-            f.write(f"\nworkspace_roots = ['{ws_root}']\n")
+        with open(USER_CONFIG) as f:
+            original = f.read()
+        # install --user already wrote a live workspace_roots (151
+        # follow-up 1): replace it in place rather than append another one,
+        # or the file ends up with the key twice ("duplicate key", #466).
+        cfg = re.sub(r"(?m)^workspace_roots\s*=.*$", f"workspace_roots = ['{ws_root}']", original)
+        if cfg == original:
+            cfg = original + f"\nworkspace_roots = ['{ws_root}']\n"
+        with open(USER_CONFIG, "w") as f:
+            f.write(cfg)
 
         status, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner.auth)
         rc, out = sh([USER_BIN, "enroll", "--name", "windows-accept-user"], input=issued["enrollment"] + "\n")

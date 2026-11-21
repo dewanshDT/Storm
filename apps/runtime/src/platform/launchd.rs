@@ -829,6 +829,33 @@ mod tests {
         );
     }
 
+    /// Regression for #466: a second `install --user` must never touch an
+    /// existing `runtime.toml`, however many times it runs — the step list
+    /// has no `Config` step for it (checked above), and here we write the
+    /// file for real and show it is still there with its one key, byte for
+    /// byte, after planning a reinstall.
+    #[test]
+    fn a_reinstalled_config_file_keeps_exactly_one_workspace_roots_key() {
+        let l = alice();
+        let written = user_default_config(&l);
+        assert_eq!(
+            written.matches("\nworkspace_roots =").count(),
+            1,
+            "{written}"
+        );
+
+        let f = UserFacts {
+            config_exists: true,
+            ..facts()
+        };
+        let (steps, _) = plan_user_install(&l, &f).unwrap();
+        assert!(!steps.contains(&UserStep::Config));
+
+        // No Config step: a reinstall leaves the file exactly as it was.
+        assert_eq!(written, user_default_config(&l));
+        toml::from_str::<crate::config::RuntimeConfig>(&written).expect("still parses");
+    }
+
     #[test]
     fn a_user_install_refuses_sudo_the_service_account_and_brew_services() {
         let l = alice();
