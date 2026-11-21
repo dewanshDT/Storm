@@ -1401,7 +1401,8 @@ class _ThisDeviceAndroidSectionState
     if (deviceState == null) return const SizedBox.shrink();
     return ListenableBuilder(
       listenable: Listenable.merge([deviceState, local, ?push]),
-      builder: (context, _) => _body(context, deviceState, local, push, viaNtfy),
+      builder: (context, _) =>
+          _body(context, deviceState, local, push, viaNtfy),
     );
   }
 
@@ -1471,6 +1472,12 @@ class _ThisDeviceAndroidSectionState
                   ),
           ),
           SettingsRow(
+            // Same key 161-9's own mobile delivery row uses
+            // (`_ThisDeviceMobileSection`) — this row fills the identical
+            // role for Android, just with a real push state to report
+            // once one exists, so a test or a person looking for "the
+            // delivery row" finds the same name either way.
+            key: const Key('device-delivery-mobile'),
             label: 'Delivery',
             sub: _deliveryLabel(prefs, push, viaNtfy),
             trailing: on || viaNtfy

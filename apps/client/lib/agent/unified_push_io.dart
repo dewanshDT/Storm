@@ -235,11 +235,14 @@ class UnifiedPushController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  // Deliberately no `Platform.isAndroid` guard here: that belongs to
+  // whoever decides whether to *construct* this controller at all
+  // (`unifiedPushControllerProvider`'s own check, below) — not to this
+  // method, which a test constructs and drives directly against a fake
+  // [UnifiedPushBackend] on a non-Android host. A guard here would never
+  // let `_backend.initialize` run under `flutter test`, silently no-op
+  // every callback the fake backend tries to invoke.
   Future<void> _init() async {
-    if (!Platform.isAndroid) {
-      _set(UnifiedPushStatus.unavailable);
-      return;
-    }
     try {
       final alreadyRegistered = await _backend.initialize(
         onNewEndpoint: (e, i) => unawaited(_onNewEndpoint(e, i)),
@@ -314,9 +317,18 @@ class UnifiedPushController extends ChangeNotifier {
       }
       final vapid = await _fetchVapid();
       if (vapid == null) return; // _fetchVapid already set the error state.
-      _pendingRegistration = Completer<void>();
+      // A local reference, not a re-read of `_pendingRegistration` after
+      // the `await` below: the distributor's answer can arrive (and
+      // `_onNewEndpoint`/`_onRegistrationFailed` null the field back out)
+      // before this coroutine resumes, and a `!` on the now-null field
+      // would throw and overwrite the real status with "Null check
+      // operator used on a null value" — found by a fake backend that
+      // answers on the very next microtask, which is faster than any real
+      // distributor but not a case the code may assume away.
+      final pending = Completer<void>();
+      _pendingRegistration = pending;
       await _backend.register(instance: kUnifiedPushInstance, vapid: vapid);
-      await _pendingRegistration!.future.timeout(
+      await pending.future.timeout(
         const Duration(seconds: 25),
         onTimeout: () {
           _set(
