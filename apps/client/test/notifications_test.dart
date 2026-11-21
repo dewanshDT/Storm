@@ -411,7 +411,19 @@ void main() {
       final agents = FakeAgentServer(hosts: [host()]);
       agents.extra = notif.handle;
       final c = shellContainer(agentClient: agents.client);
-      await pumpShell(tester, c, size: wide);
+      // A taller viewport, not a behaviour change: this page's own test
+      // platform defaults to android (`flutter test`'s own default, not
+      // an override anything here sets), so 161-8's "This device"
+      // Android section — richer than the plain mobile fallback it adds
+      // to — pushes every row below it further down the page. Even
+      // scrolled to the list's own maximum extent, this toggle's center
+      // still landed just past `wide`'s 900px height (the rows after it
+      // — events, messages-from-agents, quiet hours — are taller than
+      // what scrolling the toggle to the top could make room for); a
+      // taller canvas is simpler and more robust than fighting
+      // `Scrollable.ensureVisible`'s own scroll-clamping over a few
+      // pixels.
+      await pumpShell(tester, c, size: const Size(1400, 2000));
       c.read(routerProvider).go(Routes.settingsPage('notifications'));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('notify-agent-default')));
