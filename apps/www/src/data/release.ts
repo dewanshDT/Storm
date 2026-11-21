@@ -11,7 +11,7 @@
  */
 export const release = {
   tag: "v0.18.1",
-  latest: null as string | null,
+  latest: "v0.19.0" as string | null,
   get version() {
     return this.tag.replace(/^v/, "");
   },
