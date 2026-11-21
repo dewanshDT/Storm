@@ -27,6 +27,13 @@ pub struct DevicePrefs {
     pub classes: Vec<String>,
     pub preview: String,
     pub updated_at: String,
+    /// This device's push endpoint health (decision 161, slice 161-6):
+    /// `None` here from the database row alone — `ops::get_device_prefs`
+    /// fills it in with one extra, indexed `push_endpoints` query, cheap
+    /// enough to do on every `GET /v1/notifications/device`. `None` means
+    /// no endpoint registered, not "unhealthy".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push: Option<super::push_endpoints::PushEndpointHealth>,
 }
 
 /// One row of `GET /v1/notifications/devices` — this device's prefs beside
@@ -69,6 +76,7 @@ fn row_to_prefs(row: &rusqlite::Row<'_>) -> rusqlite::Result<DevicePrefs> {
         classes: decode_classes(&classes_raw),
         preview: row.get(3)?,
         updated_at: row.get(4)?,
+        push: None,
     })
 }
 

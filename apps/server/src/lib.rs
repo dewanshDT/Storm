@@ -50,6 +50,7 @@ mod merge;
 mod nettrust;
 mod ops;
 mod parse;
+mod push;
 mod registry;
 mod relay;
 mod trash;
@@ -1230,6 +1231,16 @@ async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
     // the forwarder below finds whatever a previous run left pending.
     let feedback =
         crate::feedback::Feedback::open(&state_dir).context("opening the feedback queue")?;
+    // Decision 161, slice 161-6: generated on first use, then held for the
+    // process's life. Loaded before `auth_db` moves into its `Mutex` below.
+    let vapid = Arc::new(
+        crate::push::vapid::load_or_create(&mut auth_db, &state_dir)
+            .context("loading this server's VAPID keypair")?,
+    );
+    let push_secrets = Arc::new(
+        crate::push::crypto::SecretKey::load_or_create(&state_dir)
+            .context("loading the push secret-sealing key")?,
+    );
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1259,11 +1270,17 @@ async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
         ),
         diag_ring,
         feedback,
+        vapid,
+        push_secrets,
     });
     // Decision 162b: one forwarder for the process's whole life, resuming
     // whatever the queue already holds — a restart needs nothing special,
     // since a pending row is simply one whose `next_attempt` is past.
     tokio::spawn(crate::feedback::forwarder::run(state.clone()));
+    // Decision 161, slice 161-6: the push sender. Its own seam, watching
+    // the notification feed from the outside rather than the Notifier's
+    // code importing it — see `push::delivery`'s module doc.
+    tokio::spawn(crate::push::delivery::run(state.clone()));
 
     ops::reconcile_single_user(&state)
         .await
