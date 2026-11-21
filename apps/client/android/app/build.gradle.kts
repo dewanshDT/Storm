@@ -72,6 +72,22 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
+// unifiedpush_android's connector (org.unifiedpush.android:connector:3.3.5)
+// depends on the JVM `tink:1.23.0`, while flutter_secure_storage depends on
+// `tink-android:1.21.0` — both are com.google.crypto.tink but different
+// artifacts, so checkReleaseDuplicateClasses fails on their shared classes.
+// tink-android is the correct variant on Android; substitute the JVM one
+// away rather than exclude it, so both plugins still resolve a Tink. Pinned
+// to 1.23.0 (the higher of the two requested versions) to satisfy both.
+// Neither tink-android version depends on protobuf, so this introduces no
+// protobuf-java/protobuf-javalite collision.
+configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("com.google.crypto.tink:tink"))
+            .using(module("com.google.crypto.tink:tink-android:1.23.0"))
+    }
+}
+
 flutter {
     source = "../.."
 }
