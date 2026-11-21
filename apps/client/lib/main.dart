@@ -16,6 +16,8 @@ import 'agent/desktop_notifications.dart'
         desktopNotifierProvider,
         notificationTapped;
 import 'agent/oauth_links.dart';
+import 'agent/unified_push.dart'
+    show runUnifiedPushBackgroundEntrypoint, unifiedPushControllerProvider;
 import 'agent/web_notifications.dart' show webNotifierProvider;
 import 'router.dart';
 import 'state/app_state.dart';
@@ -23,7 +25,20 @@ import 'ui/shell/window_buttons.dart' show initWindowChrome;
 import 'ui/theme.dart';
 import 'ui/themes/theme_library.dart';
 
-Future<void> main() async {
+/// Decision 161-8: the argument Android's `UnifiedPushService` passes to
+/// this same `main()` when it spins up a headless engine for a push that
+/// arrived with the app's process fully killed — see
+/// `unified_push.dart`'s doc comment for how that engine is created and
+/// why `main()`, not some other entrypoint, is what runs. Every other
+/// platform, and a normal launch on Android, never sees this argument.
+const _kUnifiedPushBgArg = '--unifiedpush-bg';
+
+Future<void> main(List<String> args) async {
+  if (args.contains(_kUnifiedPushBgArg)) {
+    WidgetsFlutterBinding.ensureInitialized();
+    await runUnifiedPushBackgroundEntrypoint();
+    return;
+  }
   // Clean URLs on the web, so a link to a note looks like a path rather than
   // a fragment. No effect on any other platform.
   usePathUrlStrategy();
@@ -162,6 +177,10 @@ class _StormAppState extends ConsumerState<StormApp>
     // other platform, so this is harmless there.
     ref.watch(desktopNotifierProvider);
     ref.watch(webNotifierProvider);
+    // 161-8: null everywhere but Android, same reason as the two above —
+    // watched so `UnifiedPush.initialize` runs exactly once a process and
+    // stays registered for an endpoint-change callback.
+    ref.watch(unifiedPushControllerProvider);
 
     // Both members of the chosen family, and the mode: with `system`,
     // Flutter follows the platform's brightness live (decision 160). A

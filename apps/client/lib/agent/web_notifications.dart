@@ -95,6 +95,7 @@ class WebOsNotifications implements OsNotifications {
     String? threadId,
     required String category,
     required bool sound,
+    String? androidClass,
   }) async {
     rawShow(
       id: id,

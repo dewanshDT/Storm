@@ -63,6 +63,7 @@ class _FakeOs implements OsNotifications {
     String? threadId,
     required String category,
     required bool sound,
+    String? androidClass,
   }) async {
     shown[id] = title;
     payloads[id] = payload;

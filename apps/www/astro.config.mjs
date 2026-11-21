@@ -83,6 +83,7 @@ export default defineConfig({
             "docs/agents/claude-login",
           ],
         },
+        { label: "Notifications", items: ["docs/notifications"] },
         { label: "MCP", items: ["docs/mcp/connect"] },
         {
           label: "Operate",

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -5,7 +6,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:unifiedpush/unifiedpush.dart';
+import 'package:unifiedpush_platform_interface/data/public_key_set.dart';
 
+import 'package:storm/agent/agent_api.dart';
+import 'package:storm/agent/desktop_notifications.dart' show OsNotifications;
+import 'package:storm/agent/device_notification_prefs_state.dart';
+import 'package:storm/agent/unified_push.dart';
 import 'package:storm/router.dart';
 
 import 'shell_harness.dart';
@@ -16,6 +24,10 @@ import 'shell_harness.dart';
 /// quietest possible shape — these tests are about the device section
 /// alone.
 void main() {
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
   const desk = Size(1280, 800);
 
   Map<String, dynamic> device({
@@ -71,6 +83,22 @@ void main() {
     if (req.url.path == '/v1/notifications/mutes') {
       return http.Response(jsonEncode([]), 200);
     }
+    // 161-8: the android UnifiedPush group below reuses this same client
+    // for its own `AgentApi`, so it needs these two answered too.
+    if (req.url.path == '/v1/push/vapid') {
+      return http.Response(jsonEncode({'public_key': 'test-vapid-key'}), 200);
+    }
+    if (req.url.path == '/v1/push/endpoints' && req.method == 'POST') {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      return http.Response(
+        jsonEncode({'id': 'ep_test', 'kind': body['kind'], 'created': 'now'}),
+        200,
+      );
+    }
+    if (req.url.path.startsWith('/v1/push/endpoints/') &&
+        req.method == 'DELETE') {
+      return http.Response('', 200);
+    }
     return http.Response('', 404);
   });
 
@@ -79,18 +107,27 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('hidden entirely on a phone platform (android)', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    try {
-      final c = shellContainer(agentClient: client(device, (_) {}));
-      await pumpShell(tester, c, size: desk);
-      await open(tester, c);
-      expect(find.byKey(const Key('device-notify-enabled')), findsNothing);
-      await disposeShell(tester, c);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
+  testWidgets(
+    'android with no push controller (the real one never resolves off a '
+    'real Android OS, which this harness is not) still shows the section, '
+    'offering Enable rather than hiding entirely (decision 161, 161-8)',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        final c = shellContainer(agentClient: client(device, (_) {}));
+        await pumpShell(tester, c, size: desk);
+        await open(tester, c);
+        expect(find.byKey(const Key('device-notify-enabled')), findsOneWidget);
+        expect(
+          find.byKey(const Key('android-enable-notifications')),
+          findsOneWidget,
+        );
+        await disposeShell(tester, c);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 
   testWidgets('shown on a desktop platform (linux), with the platform '
       "default's enabled state", (tester) async {
@@ -224,4 +261,209 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  group('android: UnifiedPush states (decision 161, slice 161-8)', () {
+    UnifiedPushController controller(
+      _FakeUpBackend backend, {
+      OsNotifications? os,
+    }) {
+      AgentApi factory() => AgentApi(
+        baseUrl: 'http://test',
+        token: 't',
+        client: client(device, (_) {}),
+      );
+      return UnifiedPushController(
+        backend: backend,
+        apiFactory: factory,
+        deviceState: DeviceNotificationPrefsState(factory),
+        os: os,
+      );
+    }
+
+    Future<void> pumpWith(
+      WidgetTester tester,
+      UnifiedPushController push,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final c = shellContainer(
+        agentClient: client(device, (_) {}),
+        unifiedPush: push,
+      );
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c);
+      addTearDown(() async {
+        await disposeShell(tester, c);
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
+
+    testWidgets('distributorMissing: offers Play Store and F-Droid', (
+      tester,
+    ) async {
+      final backend = _FakeUpBackend()..distributors = const [];
+      final push = controller(backend);
+      await push.enable();
+      await pumpWith(tester, push);
+
+      expect(find.text('No push app installed'), findsOneWidget);
+      expect(
+        find.byKey(const Key('android-install-ntfy-play')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('android-install-ntfy-fdroid')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('permissionDenied: offers Open system settings', (
+      tester,
+    ) async {
+      final backend = _FakeUpBackend();
+      final push = controller(backend, os: _FakeUpOs()..osPermission = false);
+      await push.enable();
+      await pumpWith(tester, push);
+
+      expect(find.text('Notifications are blocked'), findsOneWidget);
+      expect(
+        find.byKey(const Key('android-open-system-settings')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('error: shows the failure reason', (tester) async {
+      final backend = _FakeUpBackend()
+        ..respondWithFailure = FailedReason.network;
+      final push = controller(backend);
+      await push.enable();
+      await Future<void>.delayed(Duration.zero);
+      await pumpWith(tester, push);
+
+      expect(find.text('Could not enable notifications'), findsOneWidget);
+      expect(
+        find.text(describeFailedReason(FailedReason.network)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('on: shows the delivery row, classes and a disable toggle', (
+      tester,
+    ) async {
+      final backend = _FakeUpBackend()
+        ..respondWithEndpoint = PushEndpoint(
+          'https://push.example/x',
+          PublicKeySet('pub', 'auth'),
+        );
+      final push = controller(backend);
+      await push.enable();
+      await Future<void>.delayed(Duration.zero);
+      await pumpWith(tester, push);
+
+      expect(push.status, UnifiedPushStatus.on);
+      expect(find.byKey(const Key('device-notify-enabled')), findsOneWidget);
+      expect(find.textContaining('Push via ntfy'), findsOneWidget);
+      expect(find.byKey(const Key('device-class-needs_you')), findsOneWidget);
+      expect(find.byKey(const Key('device-send-test')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('device-notify-enabled')));
+      await tester.pumpAndSettle();
+      expect(backend.unregisterCalls, [kUnifiedPushInstance]);
+    });
+  });
+}
+
+/// A fake [UnifiedPushBackend] for the widget-level "This device" states —
+/// the unit-level state machine itself is `unified_push_test.dart`'s.
+class _FakeUpBackend implements UnifiedPushBackend {
+  void Function(PushEndpoint, String)? onNewEndpoint;
+  void Function(FailedReason, String)? onRegistrationFailed;
+  void Function(String)? onUnregistered;
+
+  List<String> distributors = const ['io.heckel.ntfy'];
+  String? currentDistributor = 'io.heckel.ntfy';
+  PushEndpoint? respondWithEndpoint;
+  FailedReason? respondWithFailure;
+  final unregisterCalls = <String>[];
+
+  @override
+  Future<bool> initialize({
+    required void Function(PushEndpoint endpoint, String instance)
+    onNewEndpoint,
+    required void Function(FailedReason reason, String instance)
+    onRegistrationFailed,
+    required void Function(String instance) onUnregistered,
+    required void Function(PushMessage message, String instance) onMessage,
+    required void Function(String instance) onTempUnavailable,
+  }) async {
+    this.onNewEndpoint = onNewEndpoint;
+    this.onRegistrationFailed = onRegistrationFailed;
+    this.onUnregistered = onUnregistered;
+    return false;
+  }
+
+  @override
+  Future<void> register({required String instance, String? vapid}) async {
+    if (respondWithEndpoint != null) {
+      scheduleMicrotask(
+        () => onNewEndpoint?.call(respondWithEndpoint!, instance),
+      );
+    } else if (respondWithFailure != null) {
+      scheduleMicrotask(
+        () => onRegistrationFailed?.call(respondWithFailure!, instance),
+      );
+    }
+  }
+
+  @override
+  Future<void> unregister(String instance) async {
+    unregisterCalls.add(instance);
+  }
+
+  @override
+  Future<List<String>> getDistributors() async => distributors;
+
+  @override
+  Future<String?> getDistributor() async => currentDistributor;
+
+  @override
+  Future<void> saveDistributor(String distributor) async {
+    currentDistributor = distributor;
+  }
+
+  @override
+  Future<bool> tryUseCurrentOrDefaultDistributor() async => false;
+}
+
+class _FakeUpOs implements OsNotifications {
+  bool? osPermission = true;
+
+  @override
+  Future<void> init({required void Function(String? payload) onTap}) async {}
+
+  @override
+  Future<void> show({
+    required int id,
+    required String title,
+    String? body,
+    String? payload,
+    String? threadId,
+    required String category,
+    required bool sound,
+    String? androidClass,
+  }) async {}
+
+  @override
+  Future<void> cancel(int id) async {}
+
+  @override
+  Future<void> cancelAll() async {}
+
+  @override
+  Future<bool?> checkPermission() async => osPermission;
+
+  @override
+  Future<void> requestPermission() async {}
+
+  @override
+  Future<bool> openSystemSettings() async => true;
 }

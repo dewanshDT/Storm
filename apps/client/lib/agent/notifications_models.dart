@@ -212,6 +212,29 @@ class AgentNotification {
         hasDeliverHint: j.containsKey('deliver'),
         deliver: j['deliver'] as String?,
       );
+
+  /// Decision 161, slice 161-8: a closed-app push's decrypted payload
+  /// (`crate::push::preview_payload` on the server) — already rendered at
+  /// this device's own preview level (`title`/`body` are final text, not
+  /// the full notice), so a client must show them as given and never run
+  /// [AgentNotification] back through its own preview logic. Every other
+  /// field defaults to whatever a bare display needs: there is no `seq`,
+  /// `created` or `source` on the wire here, and none of this device's
+  /// code reads them for a push-originated notice.
+  factory AgentNotification.fromPushPayload(Map<String, dynamic> j) =>
+      AgentNotification(
+        id: j['id'] as String,
+        seq: 0,
+        created: '',
+        source: 'storm',
+        kind: j['kind'] as String? ?? '',
+        sessionId: j['session_id'] as String?,
+        noteVaultId: j['note_vault_id'] as String?,
+        noteId: j['note_id'] as String?,
+        title: j['title'] as String? ?? 'Storm',
+        body: j['body'] as String?,
+        urgency: j['urgency'] as String? ?? 'normal',
+      );
 }
 
 /// Whether one event kind notifies, and after how long (`finished`,
@@ -341,6 +364,25 @@ const kDeviceNotificationClasses = [
 
 const kDevicePreviewLevels = ['full', 'session', 'storm'];
 
+/// This device's registered push endpoint's health (decision 161, slice
+/// 161-6/161-8) — `GET /v1/notifications/device`'s `push` field, present
+/// only once a push endpoint is registered. `null` means no endpoint, not
+/// "unhealthy": [DeviceNotificationPrefs.push] is the thing to check first.
+class PushEndpointHealth {
+  const PushEndpointHealth({this.lastOk, required this.failures});
+
+  /// An RFC3339 instant of the last successful delivery, or `null` if none
+  /// has ever succeeded.
+  final String? lastOk;
+  final int failures;
+
+  factory PushEndpointHealth.fromJson(Map<String, dynamic> j) =>
+      PushEndpointHealth(
+        lastOk: j['last_ok'] as String?,
+        failures: (j['failures'] as num?)?.toInt() ?? 0,
+      );
+}
+
 /// `GET`/`PUT /v1/notifications/device` — this device's own row (161-4).
 class DeviceNotificationPrefs {
   const DeviceNotificationPrefs({
@@ -349,6 +391,7 @@ class DeviceNotificationPrefs {
     required this.classes,
     required this.preview,
     required this.updatedAt,
+    this.push,
   });
 
   final String deviceId;
@@ -361,6 +404,11 @@ class DeviceNotificationPrefs {
   final String preview;
   final String updatedAt;
 
+  /// This device's push endpoint health, once one is registered (161-6,
+  /// 161-8). `null` means no endpoint — never pushed to, whether or not
+  /// this device's own in-app toasts are on.
+  final PushEndpointHealth? push;
+
   bool classOn(String kind) => classes.isEmpty || classes.contains(kind);
 
   factory DeviceNotificationPrefs.fromJson(Map<String, dynamic> j) =>
@@ -370,6 +418,32 @@ class DeviceNotificationPrefs {
         classes: [for (final c in j['classes'] as List? ?? const []) '$c'],
         preview: j['preview'] as String? ?? 'full',
         updatedAt: j['updated_at'] as String? ?? '',
+        push: j['push'] == null
+            ? null
+            : PushEndpointHealth.fromJson(j['push'] as Map<String, dynamic>),
+      );
+}
+
+/// `POST /v1/push/endpoints`'s answer (decision 161, slice 161-6): the
+/// server's own id for this registration, kept locally only so a later
+/// `DELETE /v1/push/endpoints/{id}` (disable, or re-registering a new one)
+/// names the right row.
+class PushEndpointRegistration {
+  const PushEndpointRegistration({
+    required this.id,
+    required this.kind,
+    required this.created,
+  });
+
+  final String id;
+  final String kind;
+  final String created;
+
+  factory PushEndpointRegistration.fromJson(Map<String, dynamic> j) =>
+      PushEndpointRegistration(
+        id: j['id'] as String,
+        kind: j['kind'] as String? ?? '',
+        created: j['created'] as String? ?? '',
       );
 }
 

@@ -175,6 +175,35 @@ String osCategoryOf(AgentNotification n) => n.source == 'storm'
     ? kStormNotificationCategory
     : kAgentMessagesNotificationCategory;
 
+/// Android channels, one per "Send to this device" class (decision 161,
+/// slice 161-8's point 3) — finer-grained than [osCategoryOf]'s two
+/// categories, because Android channels are the person's own on/off and
+/// sound switches (system Settings, not Storm's), so folding six classes
+/// into two would let turning off "Hosts" silently take "Errors" with it.
+/// `null` (a notice [deviceNotificationClassOf] has no answer for, i.e.
+/// `test`/`summary`, which never reach [devicePrefsAllow]'s class check
+/// either) falls back to a seventh, always-on channel.
+const _kAndroidChannelNames = {
+  'needs_you': 'Needs you',
+  'delete_requests': 'Delete requests',
+  'finished': 'Finished',
+  'errors': 'Errors',
+  'agent_messages': 'Agent messages',
+  'hosts': 'Hosts',
+};
+
+const _kAndroidDefaultChannelId = 'storm_notifications';
+
+/// The Android channel id for [androidClass] ("needs_you", … or `null` for
+/// `test`/`summary`), stable across app updates — Android remembers a
+/// person's own per-channel importance/sound by this id, so it must never
+/// change once shipped.
+String androidChannelIdFor(String? androidClass) =>
+    androidClass == null ? _kAndroidDefaultChannelId : 'storm_$androidClass';
+
+String androidChannelNameFor(String? androidClass) =>
+    _kAndroidChannelNames[androidClass] ?? 'Storm';
+
 /// Where a tap should go. [NotificationTapNone] is still a real target —
 /// review item 18: even a notice with no session brings the window
 /// forward, it just has nowhere further to route.
@@ -255,6 +284,10 @@ abstract class OsNotifications {
     String? threadId,
     required String category,
     required bool sound,
+    // Android only (161-8): one of `kDeviceNotificationClasses`, or `null`
+    // for a notice with no class (`test`/`summary`) — see
+    // `androidChannelIdFor`. Every other platform ignores it.
+    String? androidClass,
   });
   Future<void> cancel(int id);
   Future<void> cancelAll();
@@ -318,6 +351,11 @@ class RealOsNotifications implements OsNotifications {
             guid: '6f1b1c0e-6b7b-4a9e-9b0a-2a9b7c7a0f1a',
             iconPath: windowsIconPath(),
           ),
+          // 161-8: alert/sound permission is `POST_NOTIFICATIONS`, asked
+          // explicitly by "Enable notifications" (never implicitly here —
+          // this plugin has no "ask on init" option on Android the way
+          // Darwin's `requestAlertPermission` does).
+          android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
         ),
         onDidReceiveNotificationResponse: (r) => onTap(r.payload),
       );
@@ -349,6 +387,7 @@ class RealOsNotifications implements OsNotifications {
     String? threadId,
     required String category,
     required bool sound,
+    String? androidClass,
   }) => _plugin.show(
     id: id,
     title: title,
@@ -371,6 +410,25 @@ class RealOsNotifications implements OsNotifications {
       // suppress the toast's own default sound.
       windows: WindowsNotificationDetails(
         audio: sound ? null : WindowsNotificationAudio.silent(),
+      ),
+      // 161-8: a channel per class, auto-created on first use with these
+      // exact details (the plugin never overwrites an existing channel's
+      // importance/sound once the person has touched it in system
+      // Settings — only its name/description here). `groupKey: threadId`
+      // (the session id) is Android's own "N notifications" stack; Storm's
+      // own 60s/≥3 fold (`planOsNotification`) still applies on top of it.
+      android: AndroidNotificationDetails(
+        androidChannelIdFor(androidClass),
+        androidChannelNameFor(androidClass),
+        channelDescription:
+            'Storm notifications: ${androidChannelNameFor(androidClass)}',
+        groupKey: threadId,
+        playSound: sound,
+        importance: Importance.high,
+        priority: Priority.high,
+        category: category == kStormNotificationCategory
+            ? AndroidNotificationCategory.status
+            : AndroidNotificationCategory.message,
       ),
     ),
   );
@@ -402,6 +460,18 @@ class RealOsNotifications implements OsNotifications {
 
   @override
   Future<bool?> checkPermission() async {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+      // `areNotificationsEnabled` is the `POST_NOTIFICATIONS` grant on
+      // API 33+, and "are notifications on for this app" (default true)
+      // below it — a device whose manufacturer skin lets someone
+      // pre-disable notifications without ever being asked still shows up
+      // as denied, which is the honest answer either way.
+      return await android?.areNotificationsEnabled();
+    }
     if (defaultTargetPlatform != TargetPlatform.macOS) return null;
     final mac = _plugin
         .resolvePlatformSpecificImplementation<
@@ -413,6 +483,14 @@ class RealOsNotifications implements OsNotifications {
 
   @override
   Future<void> requestPermission() async {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+      await android?.requestNotificationsPermission();
+      return;
+    }
     if (defaultTargetPlatform != TargetPlatform.macOS) return;
     final mac = _plugin
         .resolvePlatformSpecificImplementation<
@@ -422,7 +500,14 @@ class RealOsNotifications implements OsNotifications {
   }
 
   @override
-  Future<bool> openSystemSettings() {
+  Future<bool> openSystemSettings() async {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+      return await android?.openAppNotificationSettings() ?? false;
+    }
     final uri = switch (defaultTargetPlatform) {
       TargetPlatform.macOS => Uri.parse(
         'x-apple.systempreferences:com.apple.preference.notifications',

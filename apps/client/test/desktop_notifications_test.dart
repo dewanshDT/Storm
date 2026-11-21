@@ -714,6 +714,7 @@ void main() {
 class _FakeOs implements OsNotifications {
   final shown = <int, String>{};
   final payloads = <int, String?>{};
+  final androidClasses = <int, String?>{};
   var cancelledAll = false;
   var permissionRequests = 0;
   var failInit = false;
@@ -736,10 +737,12 @@ class _FakeOs implements OsNotifications {
     String? threadId,
     required String category,
     required bool sound,
+    String? androidClass,
   }) async {
     if (failShow) throw StateError('show failed');
     shown[id] = title;
     payloads[id] = payload;
+    androidClasses[id] = androidClass;
   }
 
   @override

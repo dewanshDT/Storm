@@ -33,7 +33,12 @@ abstract final class MacosLifecycle {
 
 class ThisDeviceLocalPrefs extends ChangeNotifier {
   static const _kKeepRunning = 'storm.macosKeepRunningWhenClosed';
-  static const _kSound = 'storm.notifications.soundOn';
+
+  /// Public so a path with no [ThisDeviceLocalPrefs] instance of its own
+  /// (161-8's headless push entrypoint, which has no `ProviderScope` to
+  /// read one from) can still honour the same sound setting directly.
+  static const kSoundKey = 'storm.notifications.soundOn';
+  static const _kSound = kSoundKey;
 
   ThisDeviceLocalPrefs() {
     unawaited(_load());

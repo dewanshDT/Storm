@@ -72,12 +72,20 @@ dependencies:
   device_info_plus: ^13.3.0
   window_manager: ^0.5.2
   flutter_local_notifications: ^23.0.3
+  # Android closed-app push (decision 161, slice 161-8): the UnifiedPush
+  # distributor protocol. Android only — every call site below is gated
+  # on `Platform.isAndroid`/`defaultTargetPlatform`.
+  unifiedpush: ^6.2.0
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.
   sqlite3: ^3.5.1
   flutter_test:
     sdk: flutter
+  # 161-8's tests construct `PushEndpoint`/`PublicKeySet` directly — a
+  # direct dev dependency rather than relying on it arriving transitively
+  # through `unifiedpush`.
+  unifiedpush_platform_interface: ^4.0.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
