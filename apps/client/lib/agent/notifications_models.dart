@@ -251,6 +251,9 @@ class NotificationPrefs {
     required this.perSessionLimit,
     required this.retentionDays,
     required this.retentionRows,
+    this.ntfyUrl,
+    this.ntfyTokenSet = false,
+    this.ntfyPreview = 'session',
   });
 
   final int version;
@@ -274,6 +277,19 @@ class NotificationPrefs {
   final int retentionDays;
   final int retentionRows;
 
+  /// 161-9: the ntfy sink's topic URL. `null` means off ("enabled iff url
+  /// set").
+  final String? ntfyUrl;
+
+  /// Never the token itself — a GET never returns it.
+  final bool ntfyTokenSet;
+
+  /// `full`, `session` (default) or `storm` — shares its values with the
+  /// per-device preview levels ([kDevicePreviewLevels]).
+  final String ntfyPreview;
+
+  bool get ntfyEnabled => ntfyUrl != null && ntfyUrl!.isNotEmpty;
+
   bool eventOn(String kind) => events[kind]?.on ?? defaultEventOn(kind);
 
   factory NotificationPrefs.fromJson(Map<String, dynamic> j) =>
@@ -296,7 +312,30 @@ class NotificationPrefs {
         perSessionLimit: (j['per_session_limit'] as num?)?.toInt() ?? 20,
         retentionDays: (j['retention_days'] as num?)?.toInt() ?? 30,
         retentionRows: (j['retention_rows'] as num?)?.toInt() ?? 1000,
+        ntfyUrl: j['ntfy_url'] as String?,
+        ntfyTokenSet: j['ntfy_token_set'] as bool? ?? false,
+        ntfyPreview: j['ntfy_preview'] as String? ?? 'session',
       );
+}
+
+/// `POST /v1/notifications/ntfy/test`'s result (161-9): distinct from
+/// [AgentNotification] — the device OS test ("Send a test notification"
+/// above) proves *this device's* delivery; this one proves the account's
+/// ntfy sink, through the real publish path, and can fail (no network, a
+/// wrong token) in a way that is never the OS test's business.
+class NtfyTestResult {
+  const NtfyTestResult({required this.sent, this.error});
+
+  final bool sent;
+
+  /// Never the url or the token — only what the server's own publish call
+  /// returned (a status code, or "network error"/"timeout").
+  final String? error;
+
+  factory NtfyTestResult.fromJson(Map<String, dynamic> j) => NtfyTestResult(
+    sent: j['sent'] as bool? ?? false,
+    error: j['error'] as String?,
+  );
 }
 
 /// `GET /v1/notifications/mutes`' row.

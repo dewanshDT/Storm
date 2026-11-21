@@ -392,6 +392,16 @@ class NotificationsState extends ChangeNotifier {
     }
   }
 
+  /// 161-9: the ntfy sink's own test.
+  Future<NtfyTestResult> sendTestNtfy() async {
+    final api = _apiFactory();
+    try {
+      return await api.sendTestNtfy();
+    } finally {
+      api.dispose();
+    }
+  }
+
   @override
   void dispose() {
     _disposed = true;

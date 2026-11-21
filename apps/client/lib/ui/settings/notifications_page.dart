@@ -24,8 +24,10 @@ import '../../agent/desktop_platform.dart';
 import '../../agent/device_notification_prefs_state.dart';
 import '../../agent/notifications_models.dart';
 import '../../agent/notifications_state.dart';
+import '../../agent/ntfy_topic.dart';
 import '../../agent/this_device_local_prefs.dart';
 import '../../agent/web_notifications.dart';
+import '../clipboard_copy.dart';
 import '../controls.dart';
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
@@ -123,6 +125,10 @@ class _NotificationsPageBodyState
     extends ConsumerState<_NotificationsPageBody> {
   final _tz = TextEditingController();
   String? _tzEditedFor;
+
+  /// 161-9: "This device" on a phone links here ("set up ntfy below")
+  /// rather than duplicating the section.
+  final _ntfySectionKey = GlobalKey();
 
   @override
   void dispose() {
@@ -226,7 +232,7 @@ class _NotificationsPageBodyState
       title: 'Notifications',
       intro: 'What Storm tells you about, and when.',
       children: [
-        const _ThisDeviceSection(),
+        _ThisDeviceSection(ntfySectionKey: _ntfySectionKey),
         const GroupLabel('What Storm tells you about', bottom: 10),
         for (final kind in kNotificationEventKinds)
           _EventRow(
@@ -328,6 +334,13 @@ class _NotificationsPageBodyState
         ),
         SizedBox(height: t.sp * 1.5),
         _PauseControl(state: state, prefs: prefs),
+
+        _NtfySection(
+          key: _ntfySectionKey,
+          state: state,
+          prefs: prefs,
+          onApply: _apply,
+        ),
 
         GroupLabel('Inbox', top: t.sp * 3),
         SettingsRow(
@@ -623,11 +636,217 @@ class _PauseControlState extends State<_PauseControl> {
   }
 }
 
+/// "ntfy (optional)" (decision 161, slice 161-9): an account-wide sink,
+/// independent of any one device — the phone may be closed. Its own
+/// preview setting defaults to "Session name only" and never carries agent
+/// text unless set to "Full text" (with the warning below), because
+/// ntfy.sh stores everything it forwards as plain text.
+class _NtfySection extends StatefulWidget {
+  const _NtfySection({
+    super.key,
+    required this.state,
+    required this.prefs,
+    required this.onApply,
+  });
+
+  final NotificationsState state;
+  final NotificationPrefs prefs;
+  final Future<void> Function(Map<String, dynamic> patch) onApply;
+
+  @override
+  State<_NtfySection> createState() => _NtfySectionState();
+}
+
+class _NtfySectionState extends State<_NtfySection> {
+  final _url = TextEditingController();
+  final _token = TextEditingController();
+  String? _urlEditedFor;
+  bool _testing = false;
+  NtfyTestResult? _testResult;
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _token.dispose();
+    super.dispose();
+  }
+
+  // Neither method below touches `_urlEditedFor`: that field means "the
+  // server value this controller was last synced *from*" (build()'s own
+  // guard), not "what I just asked to save". Setting it here would make
+  // the very next build see a mismatch against the still-stale `prefs`
+  // and immediately overwrite the field back to the old value, before
+  // the PUT in flight has had any chance to land.
+
+  Future<void> _generate() async {
+    final url = randomNtfyUrl();
+    setState(() => _url.text = url);
+    await widget.onApply({'ntfy_url': url});
+  }
+
+  Future<void> _submitUrl(String value) async {
+    await widget.onApply({'ntfy_url': value.trim()});
+  }
+
+  Future<void> _submitToken(String value) async {
+    await widget.onApply({'ntfy_token': value});
+    // Never kept in the field, or re-shown, once sent: the hint
+    // ("Set") is what confirms it landed.
+    _token.clear();
+  }
+
+  Future<void> _copyUrl() async {
+    final ok = await copyToClipboard(_url.text);
+    if (!mounted) return;
+    settingsToast(context, ok ? 'Copied.' : 'Could not copy.');
+  }
+
+  Future<void> _test() async {
+    setState(() {
+      _testing = true;
+      _testResult = null;
+    });
+    try {
+      final result = await widget.state.sendTestNtfy();
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _testResult = result;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _testResult = NtfyTestResult(sent: false, error: describeFailure(e));
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final prefs = widget.prefs;
+    if (_urlEditedFor != prefs.ntfyUrl) {
+      _url.text = prefs.ntfyUrl ?? '';
+      _urlEditedFor = prefs.ntfyUrl;
+    }
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const GroupLabel('ntfy (optional)', bottom: 10),
+          Text(
+            'Install the ntfy app (Android/iPhone), add this topic — Storm '
+            'publishes there independent of whether this device is open.',
+            style: TextStyle(fontSize: t.labelSize, color: t.text3),
+          ),
+          SizedBox(height: t.sp),
+          SettingsRow(
+            label: 'Topic URL',
+            sub:
+                'ntfy.sh stores this as plain text; self-host your own '
+                'server for more privacy.',
+            trailing: SizedBox(
+              width: t.sp * 22,
+              child: StormInput(
+                key: const Key('ntfy-url'),
+                controller: _url,
+                hintText: 'https://ntfy.sh/storm-…',
+                onSubmitted: (v) => unawaited(_submitUrl(v)),
+                suffix: IconButton(
+                  key: const Key('ntfy-copy'),
+                  tooltip: 'Copy',
+                  icon: Icon(Icons.copy, size: t.bodySize),
+                  onPressed: _url.text.isEmpty
+                      ? null
+                      : () => unawaited(_copyUrl()),
+                ),
+              ),
+            ),
+          ),
+          SettingsButtonRow(
+            child: StormButton.outline(
+              key: const Key('ntfy-generate'),
+              label: 'Generate private topic',
+              onPressed: () => unawaited(_generate()),
+            ),
+          ),
+          SettingsRow(
+            label: 'Token',
+            sub: 'Optional — only if your topic needs one.',
+            trailing: SizedBox(
+              width: t.sp * 16,
+              child: StormInput(
+                key: const Key('ntfy-token'),
+                controller: _token,
+                obscureText: true,
+                hintText: prefs.ntfyTokenSet ? 'Set' : 'Bearer token',
+                onSubmitted: (v) => unawaited(_submitToken(v)),
+              ),
+            ),
+          ),
+          SizedBox(height: t.sp * 0.75),
+          SettingsRow(
+            label: 'Show',
+            divider: false,
+            trailing: ChoiceChips<String>(
+              key: const Key('ntfy-preview'),
+              options: [
+                for (final level in kDevicePreviewLevels)
+                  ChoiceOption(level, _kPreviewLabels[level] ?? level),
+              ],
+              selected: prefs.ntfyPreview,
+              onSelected: (v) => unawaited(widget.onApply({'ntfy_preview': v})),
+            ),
+          ),
+          if (prefs.ntfyPreview == 'full')
+            Padding(
+              padding: EdgeInsets.only(top: t.sp * 0.5),
+              child: Text(
+                'Full text sends an agent\'s own words to ntfy as plain '
+                'text.',
+                style: TextStyle(fontSize: t.labelSize, color: t.amber),
+              ),
+            ),
+          SizedBox(height: t.sp * 1.5),
+          SettingsButtonRow(
+            child: StormButton.outline(
+              key: const Key('ntfy-test'),
+              label: _testing ? 'Testing…' : 'Test',
+              onPressed: !prefs.ntfyEnabled || _testing
+                  ? null
+                  : () => unawaited(_test()),
+            ),
+          ),
+          if (_testResult != null)
+            Padding(
+              padding: EdgeInsets.only(top: t.sp * 0.5),
+              child: Text(
+                _testResult!.sent
+                    ? 'Sent — check your phone.'
+                    : 'Failed: ${_testResult!.error ?? 'unknown error'}',
+                key: const Key('ntfy-test-result'),
+                style: TextStyle(
+                  fontSize: t.labelSize,
+                  color: _testResult!.sent ? t.text3 : t.danger,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// "This device" (decision 161, slice 161-4): nothing on phones or web,
 /// where there is no OS notification to configure and no background
 /// stream to keep open.
 class _ThisDeviceSection extends ConsumerStatefulWidget {
-  const _ThisDeviceSection();
+  const _ThisDeviceSection({required this.ntfySectionKey});
+
+  /// 161-9: the mobile branch's "set up ntfy below" scrolls here.
+  final GlobalKey ntfySectionKey;
 
   @override
   ConsumerState<_ThisDeviceSection> createState() => _ThisDeviceSectionState();
@@ -678,7 +897,13 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
     // is the host OS even under `kIsWeb`, never a "web" value of its own)
     // would read wrong on at least one of the two.
     if (kIsWeb) return const _ThisDeviceWebSection();
-    if (!isDesktopPlatform) return const SizedBox.shrink();
+    // 161-9: Android and iOS have no OS notification path of their own
+    // yet (`flutter_local_notifications` on Android is explicitly out of
+    // this slice) — rather than show nothing, as before, say so plainly
+    // and point at ntfy, which does work when the app is closed.
+    if (!isDesktopPlatform) {
+      return _ThisDeviceMobileSection(ntfySectionKey: widget.ntfySectionKey);
+    }
     final deviceState = ref.watch(deviceNotificationPrefsProvider);
     final local = ref.watch(thisDeviceLocalPrefsProvider);
     final notifier = ref.watch(desktopNotifierProvider);
@@ -844,6 +1069,68 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
       current.remove(kind);
     }
     return current;
+  }
+}
+
+/// Android and iOS (decision 161, slice 161-9): honest about what this
+/// slice actually does. The operator's own report was the reason for
+/// this section existing at all — Android showed notifications as "on"
+/// while nothing ever arrived outside the open app, because the OS was
+/// never asked and nothing here raises a system notification. Rather
+/// than imply OS delivery (or show nothing, as before), this says
+/// plainly that delivery is in-app only, and points at ntfy, which does
+/// reach a closed phone.
+class _ThisDeviceMobileSection extends ConsumerWidget {
+  const _ThisDeviceMobileSection({required this.ntfySectionKey});
+
+  final GlobalKey ntfySectionKey;
+
+  void _scrollToNtfy(BuildContext context) {
+    final target = ntfySectionKey.currentContext;
+    if (target != null) {
+      unawaited(
+        Scrollable.ensureVisible(
+          target,
+          duration: const Duration(milliseconds: 300),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final prefs = ref.watch(notificationsStateProvider)?.prefs;
+    final viaNtfy = prefs?.ntfyEnabled ?? false;
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const GroupLabel('This device', bottom: 10),
+          SettingsRow(
+            key: const Key('device-delivery-mobile'),
+            label: 'Delivery',
+            sub: viaNtfy
+                ? 'Via ntfy (account-wide)'
+                : 'Only inside the app while it\'s open. For '
+                      'notifications when Storm is closed, set up ntfy '
+                      'below.',
+            divider: false,
+            trailing: viaNtfy
+                ? null
+                : TextAction(
+                    key: const Key('device-set-up-ntfy'),
+                    label: 'Set up ntfy',
+                    onTap: () => _scrollToNtfy(context),
+                  ),
+          ),
+          SizedBox(height: t.sp * 3),
+          const SettingsDivider(),
+          SizedBox(height: t.sp * 1.5),
+        ],
+      ),
+    );
   }
 }
 

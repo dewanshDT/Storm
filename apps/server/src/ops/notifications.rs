@@ -219,6 +219,66 @@ pub async fn send_test_notification(
         .map_err(agent_error)
 }
 
+// ---- The ntfy sink's own test (decision 161, slice 161-9) ----------------
+//
+// Separate from `send_test_notification` above: that one proves *this
+// device's* OS/toast delivery. This one proves the real ntfy path end to
+// end — the account-wide sink, not any one device — so it is its own
+// endpoint rather than another branch of the general test.
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NtfyTestResult {
+    pub sent: bool,
+    /// Never the url or the token — only what [`crate::agent::ntfy::publish_with_retry`]
+    /// itself returns (a status code or "network error"/"timeout").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub async fn send_test_ntfy(
+    state: &Shared,
+    actor: &Actor,
+    device_id: Option<&str>,
+) -> ApiResult<NtfyTestResult> {
+    crews_owner(actor)?;
+    let settings = state
+        .agent
+        .ntfy_settings()
+        .map_err(agent_error)?
+        .ok_or_else(|| bad_request("ntfy is not configured"))?;
+    // Reuses the inbox's own test notice (161-4) so the two tests agree on
+    // what "a test" looks like, then publishes it through the real ntfy
+    // path rather than waiting for the forwarder's own poll and grace.
+    let notice = state
+        .agent
+        .send_test_notification(device_id)
+        .map_err(agent_error)?;
+    let (title, message) = crate::agent::ntfy::render(&settings.preview, &notice);
+    let priority = crate::agent::ntfy::priority_for(&notice.urgency);
+    let tags = crate::agent::ntfy::tags_for(&notice.kind);
+    let client = crate::agent::ntfy::http_client();
+    match crate::agent::ntfy::publish_with_retry(
+        &client,
+        &settings.url,
+        settings.token.as_deref(),
+        &title,
+        &message,
+        priority,
+        &tags,
+    )
+    .await
+    {
+        Ok(()) => Ok(NtfyTestResult {
+            sent: true,
+            error: None,
+        }),
+        Err(e) => Ok(NtfyTestResult {
+            sent: false,
+            error: Some(e),
+        }),
+    }
+}
+
 // ---- Device prefs and presence (decision 161, slice 161-4) ---------------
 //
 // Stored in `auth.db`, not `agent.db`: a device belongs to no user and

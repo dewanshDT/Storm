@@ -8700,7 +8700,8 @@ pub use notifications::{
     delete_notification_mute, get_device_prefs, get_notification_prefs,
     list_device_notification_rows, list_notification_mutes, list_notifications,
     mark_notifications_read, mark_notifications_unread, pause_notifications, put_device_prefs,
-    put_notification_prefs, send_test_notification, set_presence, unpause_notifications,
+    put_notification_prefs, send_test_notification, send_test_ntfy, set_presence,
+    unpause_notifications,
 };
 
 pub mod notify;

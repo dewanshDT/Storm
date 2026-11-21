@@ -161,7 +161,15 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await open(tester, c);
 
-      await tester.tap(find.text('Session name only'));
+      // 161-9's ntfy section has its own "Session name only" chip further
+      // down the same page — scope the tap to this device's own preview
+      // chips.
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const Key('device-preview')),
+          matching: find.text('Session name only'),
+        ),
+      );
       await tester.pumpAndSettle();
 
       expect(lastPut, {'preview': 'session'});
