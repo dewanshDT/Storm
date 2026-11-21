@@ -13,7 +13,7 @@
 class StormRuntimeLatest < Formula
   desc "Storm Runtime Host, latest channel: runs agent sessions for a Storm Server"
   homepage "https://github.com/dewanshDT/Storm"
-  url "https://github.com/dewanshDT/Storm.git", tag: "v0.19.0"
+  url "https://github.com/dewanshDT/Storm.git", tag: "v0.19.1"
   license "MIT"
   head "https://github.com/dewanshDT/Storm.git", branch: "staging"
 
