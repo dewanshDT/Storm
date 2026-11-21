@@ -201,13 +201,22 @@ Future<void> _clearEndpointId() async {
 /// re-registration on an endpoint-change callback is never missed because
 /// nothing was listening).
 class UnifiedPushController extends ChangeNotifier {
+  // `this._backend` (the lint's own suggestion) would force every call
+  // site — the real provider below, both test files — to use the
+  // private names `_backend:`/`_apiFactory:`/`_deviceState:` as their
+  // named arguments; keeping the public parameter names with a private
+  // field is the better API here.
   UnifiedPushController({
     required UnifiedPushBackend backend,
     required AgentApi Function() apiFactory,
     required DeviceNotificationPrefsState deviceState,
     OsNotifications? os,
-  }) : _backend = backend,
+  })
+    // ignore: prefer_initializing_formals
+    : _backend = backend,
+       // ignore: prefer_initializing_formals
        _apiFactory = apiFactory,
+       // ignore: prefer_initializing_formals
        _deviceState = deviceState,
        _os = os ?? RealOsNotifications() {
     unawaited(_init());
