@@ -84,7 +84,9 @@ jobs:
             echo "note: dry_run=false has no effect here — workflow_dispatch never builds or publishes in this workflow; push a tag for a real release."
           fi
 
-  # Tags used to bypass CI. Gate the publish on a green check first.
+  # Tags used to bypass CI. Gate the publish on both green first (decision
+  # 163n: split from one `check` job so clippy/analyze/unit suites and the
+  # live-server integration suites run in parallel instead of back to back).
   check:
     name: check
     if: github.event_name == 'push'
@@ -106,15 +108,41 @@ jobs:
         working-directory: apps/client
       - name: make check
         run: make check
+
+  test-live:
+    name: test-live
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
       - name: make test-live
         run: make test-live
       - name: server log on failure
         if: failure()
         run: cat .dev/live-server.log || true
 
+  # Decision 163n: build jobs no longer wait on check/test-live — only on
+  # each other's artifacts — so they start as soon as the workflow does.
+  # They still never run on a workflow_dispatch dry run: that gating used to
+  # come transitively through `needs: check` (check's own `if` above), so
+  # each build job now carries the same `if` explicitly. publish's own
+  # `needs` is what still gates the release on check AND test-live passing.
   server:
     name: server (musl + deb)
-    needs: check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,7 +216,7 @@ jobs:
   # it at all, so relay source sat in tags that shipped no relay.
   relay:
     name: relay (musl + deb)
-    needs: check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -239,7 +267,7 @@ jobs:
   # as the relay, so ring compiles and aws-lc-rs never enters.
   runtime:
     name: runtime (musl + deb)
-    needs: check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -308,7 +336,7 @@ jobs:
   # the same binary built from this tag by Formula/storm-runtime.rb.
   runtime-macos:
     name: runtime (macOS universal)
-    needs: check
+    if: github.event_name == 'push'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -381,7 +409,8 @@ jobs:
   # LaunchAgent running as the user.
   server-macos:
     name: server (macOS universal)
-    needs: [check, web]
+    if: github.event_name == 'push'
+    needs: web
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -495,7 +524,7 @@ jobs:
   # link always finds the newest; the README inside names the version.
   runtime-windows:
     name: runtime (Windows x86_64)
-    needs: check
+    if: github.event_name == 'push'
     runs-on: windows-latest
     defaults:
       run:
@@ -553,7 +582,8 @@ jobs:
   # installs it as the person's logon task.
   server-windows:
     name: server (Windows x86_64)
-    needs: [check, web]
+    if: github.event_name == 'push'
+    needs: web
     runs-on: windows-latest
     defaults:
       run:
@@ -620,7 +650,8 @@ jobs:
   # line and never recommends a host install from the other one.
   android:
     name: android (apk)
-    needs: [check, channel]
+    if: github.event_name == 'push'
+    needs: channel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -664,7 +695,8 @@ jobs:
 
   macos:
     name: macos (app)
-    needs: [check, channel]
+    if: github.event_name == 'push'
+    needs: channel
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -698,7 +730,8 @@ jobs:
   # install.ps1 and releases/latest/download always find it.
   app-windows:
     name: app (Windows x86_64)
-    needs: [check, channel]
+    if: github.event_name == 'push'
+    needs: channel
     runs-on: windows-latest
     defaults:
       run:
@@ -730,7 +763,8 @@ jobs:
   # supports, and refused if anything in the bundle needs newer.
   app-linux:
     name: app (Linux x86_64)
-    needs: [check, channel]
+    if: github.event_name == 'push'
+    needs: channel
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -758,7 +792,8 @@ jobs:
 
   web:
     name: web (zip)
-    needs: [check, channel]
+    if: github.event_name == 'push'
+    needs: channel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -784,7 +819,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [channel, server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-windows, app-linux, web]
+    needs: [channel, check, test-live, server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-windows, app-linux, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
