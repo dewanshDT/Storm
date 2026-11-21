@@ -117,8 +117,9 @@ none comes while Storm doesn't know what a session is doing.
 open, for changes that happened while Storm was in the background or
 offline, or twice for the same change on one device. A newer message takes
 the place of the one showing. Beyond these in-app messages, Storm can also
-raise real OS and push notifications — on desktop while it runs, and on
-Android even with the app closed — see [Notifications](/docs/notifications/).
+raise real OS and push notifications — on desktop while it runs, on
+Android even with the app closed, and on any phone through ntfy — see
+[Notifications](/docs/notifications/).
 
 Sessions waiting for you, blocked, failed in the last hour or on an offline
 host move to the top of their crew or section, and crews with one move up

@@ -81,9 +81,9 @@ export default defineConfig({
             "docs/agents/integrations",
             "docs/agents/plugins",
             "docs/agents/claude-login",
+            "docs/notifications",
           ],
         },
-        { label: "Notifications", items: ["docs/notifications"] },
         { label: "MCP", items: ["docs/mcp/connect"] },
         {
           label: "Operate",

@@ -754,6 +754,17 @@ class AgentApi {
             as Map<String, dynamic>,
       );
 
+  /// 161-9: the ntfy sink's own test, through the real publish path.
+  Future<NtfyTestResult> sendTestNtfy() async => NtfyTestResult.fromJson(
+    _decode(
+          await _client.post(
+            _uri('/v1/notifications/ntfy/test'),
+            headers: _headers,
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
   /// Decision 161-2: whether [id] may notify.
   Future<void> setSessionNotify(String id, bool enabled) async {
     _decode(
