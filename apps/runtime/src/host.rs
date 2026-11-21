@@ -49,7 +49,7 @@ use crate::provider::{
 };
 use crate::scrollback::{Read, Scrollback};
 use crate::status::{EndReason, SessionEnd};
-use crate::terminal::{Title, TitleObserver};
+use crate::terminal::{SchemeReportObserver, Title, TitleObserver};
 
 const SESSIONS_FILE: &str = "sessions.json";
 const BATCH: usize = 64 * 1024;
@@ -347,6 +347,10 @@ struct Events {
     /// 157g: the client's answers to its program's OSC 10/11 query, read
     /// from its input.
     answered: Mutex<crate::colour_answer::ColourAnswers>,
+    /// Decision 157's theme catch-up fix: whether the program has DEC 2031
+    /// (colour-scheme reports) on, read from its output, regardless of
+    /// `titles`/`program`.
+    scheme_report: Mutex<SchemeReportObserver>,
 }
 
 /// A session's OSC 7501 program status (decision 155).
@@ -423,6 +427,7 @@ impl Events {
             said_logged: Mutex::new(Default::default()),
             program: None,
             answered: Mutex::default(),
+            scheme_report: Mutex::default(),
         }
     }
 
@@ -480,6 +485,12 @@ impl Events {
         self.answered.lock().unwrap().current()
     }
 
+    /// Whether the program has DEC 2031 on now, `None` before its first
+    /// `h`/`l` (decision 157's theme catch-up fix).
+    fn scheme_report_now(&self) -> Option<bool> {
+        self.scheme_report.lock().unwrap().current()
+    }
+
     /// Its turn as its gated idle hooks said, if they did.
     fn hook_activity_now(&self) -> Option<&'static str> {
         self.hooks
@@ -526,6 +537,10 @@ impl SessionEvents for Events {
         } else if self.titles {
             self.title.lock().unwrap().feed(bytes);
         }
+        // Decision 157's theme catch-up fix: read regardless of
+        // `titles`/`program` — a client attaching later still learns the
+        // mode.
+        self.scheme_report.lock().unwrap().feed(bytes);
         self.ring.lock().unwrap().append(bytes);
         self.wake.notify_one();
     }
@@ -574,6 +589,10 @@ struct HostSession {
     program_sent: Mutex<Option<crate::program_status::Report>>,
     /// The colour answer last acknowledged by the server (157g).
     answered_sent: Mutex<Option<crate::colour_answer::Brightness>>,
+    /// The DEC 2031 mode last acknowledged by the server (decision 157's
+    /// theme catch-up fix). `None` until the first post, so the first status
+    /// always carries it, even `false`.
+    scheme_report_sent: Mutex<Option<bool>>,
     /// Storm asked to park it (145e): its end is reported `parked` once
     /// its workspace is kept for a resume.
     parking: AtomicBool,
@@ -1687,6 +1706,9 @@ impl Host {
             if let Some(answered) = s.events.answered_now() {
                 entry["terminal_answered"] = json!(answered.as_str());
             }
+            if let Some(scheme_report) = s.events.scheme_report_now() {
+                entry["terminal_scheme_report"] = json!(scheme_report);
+            }
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -2484,6 +2506,7 @@ impl Host {
             activity_sent: Mutex::new(None),
             program_sent: Mutex::new(None),
             answered_sent: Mutex::new(None),
+            scheme_report_sent: Mutex::new(None),
             parking: AtomicBool::new(false),
             input,
         });
@@ -2649,15 +2672,22 @@ impl Host {
             let program_changed = program != *s.program_sent.lock().unwrap();
             let answered = s.events.answered_now();
             let answered_changed = answered != *s.answered_sent.lock().unwrap();
+            let scheme_report = s.events.scheme_report_now();
+            let scheme_report_changed = scheme_report != *s.scheme_report_sent.lock().unwrap();
             if end.is_none()
                 && (title != sent
                     || harness_changed
                     || attention_changed
                     || activity_changed
                     || program_changed
-                    || answered_changed)
+                    || answered_changed
+                    || scheme_report_changed)
             {
-                let every = if program_changed || attention_changed || answered_changed {
+                let every = if program_changed
+                    || attention_changed
+                    || answered_changed
+                    || scheme_report_changed
+                {
                     PROGRAM_EVERY
                 } else {
                     TITLE_EVERY
@@ -2688,6 +2718,9 @@ impl Host {
                 if let Some(a) = answered.filter(|_| answered_changed) {
                     body["terminal_answered"] = json!(a.as_str());
                 }
+                if let Some(sr) = scheme_report.filter(|_| scheme_report_changed) {
+                    body["terminal_scheme_report"] = json!(sr);
+                }
                 if let Some(p) = &program {
                     body = with_program_status(body, p, activity.is_some());
                     if program_changed {
@@ -2707,6 +2740,7 @@ impl Host {
                     Ok(st) if st.is_success() => {
                         *s.program_sent.lock().unwrap() = program;
                         *s.answered_sent.lock().unwrap() = answered;
+                        *s.scheme_report_sent.lock().unwrap() = scheme_report;
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
@@ -9791,6 +9825,48 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .map(|(_, b)| b.clone())
             .unwrap();
         assert_eq!(hello["sessions"][0]["terminal_answered"], "dark");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 157's theme catch-up fix: the program's `CSI ? 2031 h`/`l`
+    /// in its output is posted as `terminal_scheme_report` once per change
+    /// and carried by `hello`, regardless of `titles`/`program_status`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn the_scheme_report_mode_is_reported_once_per_change() {
+        let script = r#"printf '\033[?2031h'; sleep 1.5; printf '\033[?2031l'; exec sleep 1000"#;
+        let (host, seen, _state, _roots) = prober_host(script, "program_status = false").await;
+        host.clone().handle(start("ags_SCR", "shell")).await;
+        eventually("the session runs", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_scr/status") && b["status"] == "running")
+        })
+        .await;
+        let reports = || -> Vec<serde_json::Value> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/ags_scr/status"))
+                .filter_map(|(_, b)| b.get("terminal_scheme_report").cloned())
+                .collect()
+        };
+        eventually("on", || reports() == [json!(true)]).await;
+        eventually("off", || reports().last() == Some(&json!(false))).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(reports(), [json!(true), json!(false)]);
+
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert_eq!(hello["sessions"][0]["terminal_scheme_report"], false);
         host.shutdown(Duration::from_millis(200)).await;
     }
 }

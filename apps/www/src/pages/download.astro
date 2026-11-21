@@ -43,6 +43,30 @@ import { release } from "../data/release";
       notes are always kept. By hand, firewalls and every option:
       <a href="/docs/install/server/">Install the server</a>.
     </p>
+
+    {
+      release.latest && (
+        <div class="latest-row" id="latest">
+          <p class="eyebrow">Latest (for early adopters)</p>
+          <p class="support">
+            Storm's day-to-day line (decision 163): every feature before the
+            next stable cut, with the odd rough edge. Switching channels is
+            always an explicit choice.
+          </p>
+          <div class="latest-commands">
+            <CodeBlock code={release.latestInstallCommand} label="curl" />
+            <CodeBlock code={release.latestAptLine} label="apt" />
+            <CodeBlock code={release.latestBrewCommand} label="brew" />
+            <CodeBlock code={release.latestWindowsInstallCommand} label="powershell" />
+          </div>
+          <p class="support">
+            <a href={release.latestNotesUrl!} target="_blank" rel="noopener noreferrer">
+              {release.latest} release notes →
+            </a>
+          </p>
+        </div>
+      )
+    }
   </section>
 
   <section class="section wrap" id="apps">
@@ -73,5 +97,34 @@ import { release } from "../data/release";
     font-size: var(--fs-md);
     font-weight: 600;
     color: var(--text);
+  }
+
+  .latest-row {
+    margin-top: calc(var(--sp) * 5);
+    padding: calc(var(--sp) * 3);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+  }
+
+  .latest-row .support {
+    margin-bottom: calc(var(--sp) * 2.5);
+  }
+
+  .latest-row .support:last-child {
+    margin-top: calc(var(--sp) * 2.5);
+    margin-bottom: 0;
+  }
+
+  .latest-commands {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: calc(var(--sp) * 1.5);
+  }
+
+  @media (max-width: 640px) {
+    .latest-commands {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

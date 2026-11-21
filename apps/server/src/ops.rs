@@ -2297,10 +2297,17 @@ pub async fn remove_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     crews_owner(actor)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    crate::auth::hosts::remove(&mut auth_db, host_id, actor.user_id(), &now)
+    let host = crate::auth::hosts::remove(&mut auth_db, host_id, actor.user_id(), &now)
         .map_err(internal)?
         .map_err(host_admin_refusal)?;
     drop(auth_db);
+    // Kept, not removed: a removed host's name stays in `host_names` (the
+    // `removed_hosts` table it moved to), so its ended sessions still show it.
+    state
+        .host_names
+        .write()
+        .unwrap()
+        .insert(host.id.clone(), host.name.clone());
     state.agent.forget_host(host_id).map_err(internal)?;
     Ok(())
 }
@@ -2337,10 +2344,16 @@ pub async fn rename_host(
     crate::auth::hosts::validate_name(name).map_err(bad_request)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    crate::auth::hosts::rename(&mut auth_db, host_id, name, actor.user_id(), &now)
+    let host = crate::auth::hosts::rename(&mut auth_db, host_id, name, actor.user_id(), &now)
         .map_err(internal)?
-        .map(|h| host_view(state, h))
-        .ok_or_else(|| not_found("no such host"))
+        .ok_or_else(|| not_found("no such host"))?;
+    drop(auth_db);
+    state
+        .host_names
+        .write()
+        .unwrap()
+        .insert(host.id.clone(), host.name.clone());
+    Ok(host_view(state, host))
 }
 
 /// Revokes a host: its tokens die now, and it cannot authenticate again.
@@ -2424,11 +2437,18 @@ pub async fn enroll_host(
         signature: req.signature,
     };
     match crate::auth::hosts::enroll(&mut auth_db, &state.identity.server_id, &request, &now) {
-        Ok(host) => Ok(EnrolledHost {
-            host_id: host.id,
-            server_id: state.identity.server_id.clone(),
-            name: host.name,
-        }),
+        Ok(host) => {
+            state
+                .host_names
+                .write()
+                .unwrap()
+                .insert(host.id.clone(), host.name.clone());
+            Ok(EnrolledHost {
+                host_id: host.id,
+                server_id: state.identity.server_id.clone(),
+                name: host.name,
+            })
+        }
         Err(e) => Err(host_refusal(&auth_db, e, None, remote, &now)),
     }
 }
@@ -4914,6 +4934,11 @@ pub struct SessionView {
     /// OSC 10/11 colour query with (157g); absent until its host says.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_answered: Option<crate::agent::TerminalBrightness>,
+    /// Whether its program has DEC 2031 (colour-scheme reports) on, as its
+    /// host last said (decision 157's theme catch-up fix); absent until its
+    /// host says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_scheme_report: Option<bool>,
     /// Its host's last request, while the host is offline and the session
     /// has not ended (153a); `null` otherwise.
     pub host_last_seen: Option<String>,
@@ -5052,6 +5077,7 @@ fn session_view(
     let attention = state.agent.attention(&session).map_err(agent_error)?;
     let program_status = state.agent.program_status(&session);
     let terminal_answered = state.agent.terminal_answered(&session.id);
+    let terminal_scheme_report = state.agent.terminal_scheme_report(&session.id);
     let pending_decisions = delete_request
         .iter()
         .map(|d| PendingDecision {
@@ -5093,6 +5119,7 @@ fn session_view(
         attention,
         program_status,
         terminal_answered,
+        terminal_scheme_report,
         host_last_seen: None,
         pending_decisions,
         output_end,
@@ -5132,9 +5159,17 @@ async fn name_host_seen(state: &Shared, views: &mut [SessionView]) -> ApiResult<
 /// Names each view's role by its note's title now, so a rename follows and a
 /// deleted note reads as `None`.
 async fn name_roles(state: &Shared, views: &mut [SessionView]) -> ApiResult<()> {
-    let hosts = state.auth_db.lock().await.host_names().map_err(internal)?;
-    for view in views.iter_mut() {
-        view.host_name = hosts.get(&view.session.host_id).cloned();
+    // Never `auth_db.lock().await` here: that mutex is also held across
+    // `check_password`'s Argon2id verify (see `AppState::auth_db`'s doc
+    // comment), so every session view would otherwise queue behind a
+    // sign-in's KDF. `host_names` is the kept-in-step cache instead, and the
+    // block scopes its (non-`Send`) read guard well clear of the `.await`s
+    // below.
+    {
+        let hosts = state.host_names.read().unwrap();
+        for view in views.iter_mut() {
+            view.host_name = hosts.get(&view.session.host_id).cloned();
+        }
     }
     for view in views.iter_mut() {
         let Some(role) = view.role.as_mut() else {
@@ -5471,6 +5506,7 @@ pub async fn launch_session(
         attention: None,
         program_status: None,
         terminal_answered: None,
+        terminal_scheme_report: None,
         host_last_seen: None,
         pending_decisions: Vec::new(),
         output_end: None,
@@ -8793,6 +8829,7 @@ mod tests {
         let (events, _) = tokio::sync::broadcast::channel(8);
         let (root_changed, _) = tokio::sync::broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
+        let host_names = auth_db.host_names().unwrap();
 
         Arc::new(AppState {
             vaults: tokio::sync::RwLock::new(VaultSet {
@@ -8808,6 +8845,7 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            host_names: Arc::new(std::sync::RwLock::new(host_names)),
             listen_addr: "127.0.0.1:8484".into(),
             vault_policy: Arc::new(crate::auth::authz::StormPolicy),
             hasher: crate::auth::Hasher::new(),

@@ -14,6 +14,10 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- upgrade
 
 On Windows, run `install.ps1` again.
 
+With no `--channel`/`-Channel`, `upgrade` stays on whichever
+[release line](/docs/install/server/#latest-channel) is already installed —
+stable or latest. Switching lines is an explicit flag, never the default.
+
 **A server installed by hand on Linux** upgrades through apt — there is no
 `storm-server upgrade`. The package replaces the binary and the web app and
 leaves `/etc/storm/storm.env` alone; restart so the new binary is listening:

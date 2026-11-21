@@ -588,7 +588,7 @@ www-dev:
 www-check:
 	$(WWW)/scripts/check-claims.sh
 
-## formula-check: Formula/storm-runtime.rb builds the tag release.ts names (decision 83)
+## formula-check: both Formula/storm-runtime*.rb build the tag release.ts names (decisions 83, 163)
 formula-check:
 	tools/formula-check.sh
 
@@ -600,6 +600,17 @@ formula-check:
 installer-check:
 	tools/installer-tests/run.sh
 
+## test-release-channel: tools/release-channel.sh against a disposable git repo (decision 163c)
+test-release-channel:
+	tools/release-channel-test.sh
+
+## test-apt-repo-build: deploy/apt-repo-build.sh against tiny dummy .debs (decision 163e)
+#
+# Needs dpkg-deb, reprepro and gpg. No network, no real packages: proves the
+# cumulative stable/latest repo logic on fixtures built on the fly.
+test-apt-repo-build:
+	tools/apt-repo-build-test.sh
+
 ## clean: remove build output and local dev data
 clean:
 	cd $(SERVER) && cargo clean
@@ -609,5 +620,5 @@ clean:
 
 .PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
-        deploy-web deploy-web-check installer-check \
+        deploy-web deploy-web-check installer-check test-release-channel test-apt-repo-build \
         build-server deploy deploy-check

@@ -26,10 +26,32 @@ behaviour that has since changed.
 
 ## Releases
 
-Release prep (the vault's *Storm Releases*, decision 72) bumps `tag` in
-`src/data/release.ts` **and writes `docs/site/releases/<tag>.md`** —
-frontmatter `date` and `summary`, then the user-facing changes. `www-check`
-refuses a tag with no entry.
+Two channels (decision 163, vault: *Storm Releases*). **Stable** is `main`
+(`vX.Y.z`, public, GitHub "Latest"). **Latest** is `staging` (`vX.Y.0+`,
+GitHub pre-release). Release metadata for both lives on `main` (163n) —
+Homebrew reads its formulas from the default branch, and Cloudflare deploys
+this site from `main` — and is kept in step on `staging` so `www-check` and
+`formula-check` pass there too.
+
+**Cutting a stable release:** a PR **into `main`** — a fix, cherry-picked or
+backported from `staging`, never a feature (163l) — that also bumps `tag` in
+`src/data/release.ts` and writes `docs/site/releases/vX.Y.Z.md`
+(frontmatter `date`, `summary`, `channel: stable`). Tag `vX.Y.Z` on that PR's
+merge commit.
+
+**Cutting a latest release:** a release-prep PR **into `staging`** that
+writes `docs/site/releases/vX.Y.Z.md` (`channel: latest`) and bumps `latest`
+in `src/data/release.ts`. Tag `vX.Y.Z` on that PR's merge commit, on
+`staging`. Then a small **metadata-only PR into `main`**: the same `latest`
+bump in `release.ts`, the same notes file, and
+`Formula/storm-runtime-latest.rb`'s `tag` — nothing else; `main`'s own `tag`
+(stable) is untouched.
+
+Either way, `www-check` refuses a `tag` or a non-null `latest` with no
+matching `docs/site/releases/*.md` entry, and checks each against the newest
+tag of its own channel, by ancestry (`tools/release-channel.sh`, 163c) — not
+just the newest tag overall, or a `latest` release would make `tag` look
+stale.
 
 ## The docs
 
@@ -79,10 +101,13 @@ make www-facts # regenerate src/data/facts.json (builds server + runtime)
 other two cannot fail on a wrong sentence. It checks two things a build never
 will:
 
-- **`src/data/release.ts`'s `tag` matches the newest `v*` tag.** Nothing bumps
-  it automatically — `release.yml` does not touch this file — so cutting a
-  release without bumping leaves every download link on `/clients` pointing at
-  the previous build. **Bump `tag` as part of cutting a release.**
+- **`src/data/release.ts`'s `tag` and `latest` each match the newest tag of
+  their own channel** (decision 163, by `tools/release-channel.sh`'s
+  ancestry, not just the newest tag overall). Nothing bumps either
+  automatically — `release.yml` does not touch this file — so cutting a
+  release without bumping leaves every download link on `/download` pointing
+  at the previous build. **Bump `tag` (stable) or `latest` as part of cutting
+  that channel's release** — see "Releases" above for which PR.
 - **No page describes the shared token.** It stopped existing at the A10
   cutover (M19); the pages said otherwise for thirteen days while CI stayed green.
   The check bans the phrasings, not the word — saying "there is no token" is

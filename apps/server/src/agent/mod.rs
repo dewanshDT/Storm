@@ -683,6 +683,11 @@ pub struct StatusReport {
     /// query with (157g), sent on change; absent from an older host.
     #[serde(default)]
     pub terminal_answered: Option<String>,
+    /// Whether the program has DEC 2031 (colour-scheme reports) on, sent on
+    /// change (decision 157's theme catch-up fix); absent from an older
+    /// host.
+    #[serde(default)]
+    pub terminal_scheme_report: Option<bool>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -1006,12 +1011,16 @@ struct SessionLive {
     /// What its client last answered its program's colour query with, as
     /// its host said (157g). In memory: a host's `hello` says it again.
     terminal_answered: Option<TerminalBrightness>,
+    /// Whether its program has DEC 2031 on, as its host last said (decision
+    /// 157's theme catch-up fix). In memory: a host's `hello` says it again.
+    terminal_scheme_report: Option<bool>,
 }
 
 impl SessionLive {
     fn new() -> Self {
         Self {
             terminal_answered: None,
+            terminal_scheme_report: None,
             parking: false,
             wake_sent: None,
             terminal_brightness: None,
@@ -1421,6 +1430,17 @@ impl AgentManager {
             .sessions
             .get(session_id)?
             .terminal_answered
+    }
+
+    /// Whether a session's program has DEC 2031 on, as its host last said
+    /// (decision 157's theme catch-up fix).
+    pub fn terminal_scheme_report(&self, session_id: &str) -> Option<bool> {
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)?
+            .terminal_scheme_report
     }
 
     /// The terminal brightness a session started with in this run (171-8).
@@ -2948,6 +2968,15 @@ impl AgentManager {
                 .or_insert_with(SessionLive::new)
                 .terminal_answered = Some(answered);
         }
+        if let Some(scheme_report) = report.terminal_scheme_report {
+            self.live
+                .lock()
+                .unwrap()
+                .sessions
+                .entry(r.id.clone())
+                .or_insert_with(SessionLive::new)
+                .terminal_scheme_report = Some(scheme_report);
+        }
         let taken = self.take_signals(r, report);
         let ctx = events::EventCtx {
             source: events::HOST_PROCESS,
@@ -3955,6 +3984,7 @@ mod tests {
                 activity_source: None,
                 program_status: None,
                 terminal_answered: None,
+                terminal_scheme_report: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4092,6 +4122,7 @@ mod tests {
                 activity_source: None,
                 program_status: None,
                 terminal_answered: None,
+                terminal_scheme_report: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4723,6 +4754,7 @@ mod tests {
                 activity_source: None,
                 program_status: None,
                 terminal_answered: None,
+                terminal_scheme_report: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4746,6 +4778,7 @@ mod tests {
                 activity_source: None,
                 program_status: None,
                 terminal_answered: None,
+                terminal_scheme_report: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4774,6 +4807,7 @@ mod tests {
                 activity_source: None,
                 program_status: None,
                 terminal_answered: None,
+                terminal_scheme_report: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4875,6 +4909,7 @@ mod tests {
                 activity_source: None,
                 program_status: None,
                 terminal_answered: None,
+                terminal_scheme_report: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -5145,6 +5180,7 @@ mod tests {
                         activity_source: None,
                         program_status: None,
                         terminal_answered: None,
+                        terminal_scheme_report: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -5184,6 +5220,7 @@ mod tests {
             activity_source: None,
             program_status: None,
             terminal_answered: None,
+            terminal_scheme_report: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -5516,6 +5553,7 @@ mod tests {
                     activity_source: None,
                     program_status: None,
                     terminal_answered: None,
+                    terminal_scheme_report: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,

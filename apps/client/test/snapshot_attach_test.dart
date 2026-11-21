@@ -214,6 +214,31 @@ void main() {
       o.c.dispose();
     });
 
+    test('the theme catch-up fix: a cold attach with 2031 on and a '
+        'mismatched remembered answer asks once, live', () async {
+      final o = open();
+      o.current()
+        ..add(
+          StatusEvent(
+            AgentSession.fromJson({
+              ...agentSession('ags_1'),
+              'terminal_answered': 'light',
+              'terminal_scheme_report': true,
+            }),
+          ),
+        )
+        ..add(snapshot('screen', offset: 4000));
+      await settle();
+      expect(o.posted, isEmpty, reason: 'still replay: no reply is sent yet');
+
+      o.current().add(LiveEvent());
+      await settle(50);
+      // The default target before any view ever built is dark (157c); the
+      // remembered answer is light, so the catch-up asks for dark.
+      expect(o.posted, ['\x1b[?997;1n']);
+      o.c.dispose();
+    });
+
     test('nothing it draws is answered or typed, even once the quiet '
         'timer has passed', () async {
       final o = open();
