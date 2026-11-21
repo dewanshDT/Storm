@@ -2368,6 +2368,7 @@ dependencies = [
  "qrcode",
  "rand 0.10.2",
  "reqwest",
+ "ring",
  "rmcp",
  "rpassword",
  "rusqlite",

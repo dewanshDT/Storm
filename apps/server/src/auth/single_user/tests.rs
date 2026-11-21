@@ -206,6 +206,43 @@ const V5_SCHEMA: &str = r#"
                 preview    TEXT NOT NULL DEFAULT 'full',
                 updated_at TEXT NOT NULL
             );
+
+            -- Decision 161, slice 161-6 (AM125): closed-app push. Additive,
+            -- same reason as device_notification_prefs above — present here
+            -- so the fault-injection tests below see no change from these
+            -- tables, which every open creates regardless of version.
+            CREATE TABLE IF NOT EXISTS push_endpoints (
+                id              TEXT PRIMARY KEY,
+                device_id       TEXT NOT NULL REFERENCES client_devices(id) ON DELETE CASCADE,
+                kind            TEXT NOT NULL CHECK (kind IN ('webpush', 'unifiedpush')),
+                endpoint        TEXT NOT NULL,
+                p256dh          TEXT NOT NULL,
+                auth_secret_enc BLOB NOT NULL,
+                created         TEXT NOT NULL,
+                last_ok         TEXT,
+                failures        INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (device_id, endpoint)
+            );
+            CREATE INDEX IF NOT EXISTS push_endpoints_by_device ON push_endpoints(device_id);
+            CREATE TABLE IF NOT EXISTS push_deliveries (
+                id           TEXT PRIMARY KEY,
+                endpoint_id  TEXT NOT NULL REFERENCES push_endpoints(id) ON DELETE CASCADE,
+                notice_id    TEXT NOT NULL,
+                collapse_key TEXT NOT NULL,
+                urgency      TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+                created      TEXT NOT NULL,
+                not_before   TEXT NOT NULL,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                last_error   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS push_deliveries_by_due ON push_deliveries(not_before);
+            CREATE INDEX IF NOT EXISTS push_deliveries_by_endpoint ON push_deliveries(endpoint_id);
+            CREATE TABLE IF NOT EXISTS vapid_keypair (
+                only_row   INTEGER PRIMARY KEY CHECK (only_row = 1),
+                key_id     TEXT NOT NULL,
+                public_key BLOB NOT NULL,
+                created    TEXT NOT NULL
+            );
             "#;
 
 const NOW: &str = "2026-10-08T12:00:00Z";

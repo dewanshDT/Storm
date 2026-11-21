@@ -149,6 +149,13 @@ pub struct AppState {
     /// In-app feedback (decision 162b): the preview store and the durable
     /// send queue. The forwarder reads this through its own `Shared` clone.
     pub feedback: crate::feedback::Feedback,
+    /// The server's VAPID keypair (decision 161, AM125), loaded once at
+    /// boot so signing a JWT on every push send never re-reads the key
+    /// file. See `crate::push::vapid`.
+    pub vapid: Arc<crate::push::vapid::VapidKey>,
+    /// Seals/opens `push_endpoints.auth_secret_enc` (decision 161, AM125:
+    /// "secrets encrypted at rest"). See `crate::push::crypto::SecretKey`.
+    pub push_secrets: Arc<crate::push::crypto::SecretKey>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -696,6 +703,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         )
         .route("/v1/notifications/devices", get(notification_devices_list))
         .route("/v1/notifications/presence", post(notifications_presence))
+        // Decision 161, slice 161-6: the server's encrypted push sender.
+        // Owner only, same as the rest of this block (Q18) — this
+        // device's own endpoint, never another's.
+        .route("/v1/push/vapid", get(push_vapid_get))
+        .route("/v1/push/endpoints", post(push_endpoint_register))
+        .route("/v1/push/endpoints/{id}", delete(push_endpoint_delete))
         // MCP Gateway integrations (decision 81c) — owner only, checked in
         // ops. **Session tier**, so an `stk_` key can never manage one (§14).
         .route(
@@ -3109,6 +3122,36 @@ async fn notifications_presence(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---- Push (decision 161, slice 161-6) ------------------------------------
+
+async fn push_vapid_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::ops::VapidPublicKey>> {
+    Ok(Json(crate::ops::vapid_public_key(&state, &actor).await?))
+}
+
+async fn push_endpoint_register(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<crate::ops::RegisterPushEndpoint>,
+) -> ApiResult<Json<crate::ops::PushEndpointView>> {
+    Ok(Json(
+        crate::ops::register_push_endpoint(&state, &actor, device_of(&auth), body).await?,
+    ))
+}
+
+async fn push_endpoint_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::delete_push_endpoint(&state, &actor, device_of(&auth), &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Three credential tiers: `none` (unauthenticated), `device` (paired
 /// installation), `session` (logged-in user). Set per-route via axum
 /// `Extension<RequiredTier>`.
@@ -4730,6 +4773,9 @@ pub(crate) mod tests {
             Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
         let host_names = auth_db.host_names().unwrap();
         let feedback = crate::feedback::Feedback::open(&state_dir).unwrap();
+        let vapid = Arc::new(crate::push::vapid::load_or_create(&mut auth_db, &state_dir).unwrap());
+        let push_secrets =
+            Arc::new(crate::push::crypto::SecretKey::load_or_create(&state_dir).unwrap());
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -4755,6 +4801,8 @@ pub(crate) mod tests {
             gateway,
             diag_ring: storm_diag::Ring::default(),
             feedback,
+            vapid,
+            push_secrets,
         });
         (
             router(state.clone(), crate::mcp::McpOptions { allowed_hosts }),

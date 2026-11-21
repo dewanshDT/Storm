@@ -161,12 +161,16 @@ impl AuthDb {
             "UPDATE client_devices SET revoked = ?2, revoked_reason = ?3 WHERE id = ?1",
             params![id, now, reason],
         )?;
-        // Decision 161: a revoked device's notification prefs are deleted
-        // (push endpoints follow in 161-6). Revoking is an UPDATE, never a
-        // row delete, so the `ON DELETE CASCADE` on this table never fires
-        // on its own.
+        // Decision 161: a revoked device's notification prefs and push
+        // endpoints are deleted. Revoking is an UPDATE, never a row
+        // delete, so the `ON DELETE CASCADE` on these tables never fires
+        // on its own. `push_deliveries` cascades from `push_endpoints`.
         self.conn.execute(
             "DELETE FROM device_notification_prefs WHERE device_id = ?1",
+            params![id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM push_endpoints WHERE device_id = ?1",
             params![id],
         )?;
         Ok(())

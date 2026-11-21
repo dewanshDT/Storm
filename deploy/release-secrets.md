@@ -36,6 +36,39 @@ gh secret set STORM_MACOS_SIGN_IDENTITY -R dewanshDT/Storm
 
 State: **not set** (2026-10-14): releases are ad-hoc signed until they are.
 
+## macOS app signing
+
+The Flutter app (`macos` in `release.yml`, `acceptance.yml`) is a second,
+separate signing problem from the server above: it needs no firewall
+approval, but its ad-hoc designated requirement is the build's own cdhash, so
+every release is a new code identity and the keychain forgets "Always Allow"
+on `storm.deviceSecret`/`storm.accessToken`/`storm.refreshToken` on every
+update — several login-password prompts, back to back, after every install.
+A stable (even self-signed) identity fixes this: the designated requirement
+stops changing release to release, so the keychain's ACL survives an update.
+
+This does not need a paid Apple Developer account or a real CA — the app is
+never notarized either way, so a self-signed certificate buys the same
+stable identity a Developer ID would, for this specific problem.
+
+| Secret | What |
+|---|---|
+| `MACOS_SIGNING_P12` | a self-signed "Storm App Signing" code-signing cert + key, `.p12`, base64 |
+| `MACOS_SIGNING_P12_PASSWORD` | the `.p12`'s password |
+
+Run once, by the operator — it generates the certificate, sets both secrets,
+and keeps a backup under `~/.config/`:
+
+```sh
+tools/macos-signing-cert.sh
+```
+
+Without these set, `release.yml` and `acceptance.yml` build the macOS app
+exactly as before (ad-hoc, with a `::warning::` in the run log) — nothing
+about today's build breaks if this is skipped.
+
+State: **not set**: the macOS app is ad-hoc signed until this is run.
+
 ## Android upload keystore (optional until you ship APKs)
 
 ```sh

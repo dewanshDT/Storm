@@ -8706,6 +8706,12 @@ pub use notifications::{
 
 pub mod notify;
 
+pub mod push;
+pub use push::{
+    PushEndpointView, RegisterPushEndpoint, VapidPublicKey, delete_push_endpoint,
+    register_push_endpoint, vapid_public_key,
+};
+
 // ---- Token sync: the synced Claude subscription token (decision 124n) -------
 //
 // Session tier only (spec §0.3), so an `stk_` key or a host token never
@@ -9463,6 +9469,9 @@ mod tests {
         let registry = Registry::load(&state_dir, &root).unwrap();
         let host_names = auth_db.host_names().unwrap();
         let feedback = crate::feedback::Feedback::open(&state_dir).unwrap();
+        let vapid = Arc::new(crate::push::vapid::load_or_create(&mut auth_db, &state_dir).unwrap());
+        let push_secrets =
+            Arc::new(crate::push::crypto::SecretKey::load_or_create(&state_dir).unwrap());
 
         Arc::new(AppState {
             vaults: tokio::sync::RwLock::new(VaultSet {
@@ -9489,6 +9498,8 @@ mod tests {
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
             diag_ring: storm_diag::Ring::default(),
             feedback,
+            vapid,
+            push_secrets,
         })
     }
 
