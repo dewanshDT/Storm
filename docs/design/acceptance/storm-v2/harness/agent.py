@@ -70,17 +70,22 @@ def say(text):
 
 
 def main():
+    # The public set's sessions are labelled Claude Code/OpenCode, so any
+    # stand-in output there would read as theirs (spec §3): silent.
+    silent = bool(os.environ.get("STORM_PUBLIC_SILENT"))
     claude = "--mcp-config" in sys.argv
-    say("$ " + ("claude" if claude else "opencode"))
+    if not silent:
+        say("$ " + ("claude" if claude else "opencode"))
     bridges = {}
     for slug, (argv, env) in servers().items():
         p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              env={**os.environ, **env})
         bridges[slug] = p
         threading.Thread(target=pump, args=(slug, p), daemon=True).start()
-    say(f"› starting in {os.path.basename(HERE)}")
-    sys.stdout.write("› ")
-    sys.stdout.flush()
+    if not silent:
+        say(f"› starting in {os.path.basename(HERE)}")
+        sys.stdout.write("› ")
+        sys.stdout.flush()
     while True:
         for name in sorted(os.listdir(INBOX)):
             if not name.endswith(".json"):

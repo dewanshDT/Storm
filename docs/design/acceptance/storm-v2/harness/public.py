@@ -3,7 +3,13 @@
 fixture (`fixture-demo/vaults`) — independent of the paths `current`/`v2`/
 `crews` seed against their own fixture, so this never touches their default
 behaviour. Nothing in the client is faked: writes go through the gateway.
+
+Every session is labelled Claude Code, so the stand-in prints nothing to its
+terminal (`silent=True`, spec §3): only `a.title(...)` runs, which is how a
+session gets its name, never `a.say(...)`.
 """
+
+import datetime
 
 import agents
 
@@ -21,10 +27,11 @@ class PublicWorld:
     def seed(self):
         """Two hosts; a 3-member crew plus a loose running and a loose ended
         session; the hero session that reads Launch plan and writes BOARD
-        and a log note (the public set's one real agent edit)."""
+        and a log note (the public set's one real agent edit). `daybreak` on
+        build-vm is left empty, for the launcher shot's Where."""
         w, ids = self.w, self.h.ids
-        build = agents.Host(w, "build-vm", ["personal", "docs"])
-        mac = agents.Host(w, "mac-mini", ["personal"])
+        build = agents.Host(w, "build-vm", ["personal", "docs", "daybreak"], silent=True)
+        mac = agents.Host(w, "mac-mini", ["personal"], silent=True)
         for host in (build, mac):
             host.enroll()
             host.start()
@@ -33,13 +40,10 @@ class PublicWorld:
 
         _, a = w.launch(build, "personal", "claude-code", "writer-1")
         a.title("◐ Draft the release notes")
-        a.say("› drafting the 1.0 release notes")
         _, a = w.launch(build, "docs", "claude-code", "reviewer-1")
         a.title("◐ Review the onboarding copy")
-        a.say("› reading the flow end to end")
         _, a = w.launch(mac, "personal", "claude-code", "fixer-1")
         a.title("◐ Chase the export freeze")
-        a.say("› profiling the CSV writer")
 
         status, made = self.call("POST", "/v1/agent/crews", {
             "name": "Site launch", "color": "mint",
@@ -51,7 +55,6 @@ class PublicWorld:
 
         rec, a = w.launch(build, "personal", "claude-code", "cleanup-1")
         a.title("✳ Clear the test fixtures")
-        a.say("› removed 12 stale habit entries")
         a.exit(0)
         agents.wait(lambda: w.session(rec["id"])["status"] == "completed", 30,
                     "cleanup-1 completed")
@@ -66,17 +69,15 @@ class PublicWorld:
         context = a.tool("session_context")
         if "habit tracker" not in (context.get("context") or {}).get("content", ""):
             raise RuntimeError(f"session_context: {context}")
-        a.say(f"› read personal/{DAYBREAK}/Launch plan")
         vault, n = w.note(f"note:personal/{DAYBREAK}/BOARD.md")
         a.tool("update_note", {"vault": vault, "note_id": n["id"],
                                "base_version": n["version"],
                                "content": n["content"].replace(
                                    "## Next",
                                    "## Done\n\n- [x] Set up crash reporting\n\n## Next")})
-        a.say("› updated BOARD: logged a new Done item")
+        today = datetime.date.today().isoformat()
         made = a.tool("create_note", {"vault": vault,
-                                      "path": f"{DAYBREAK}/log/2026-11-24.md",
-                                      "content": "# 2026-11-24\n\n- Set up crash reporting.\n"})
-        ids[f"note:personal/{DAYBREAK}/log/2026-11-24.md"] = made["note"]["id"]
-        a.say("› created the log note\n✓ done")
+                                      "path": f"{DAYBREAK}/log/{today}.md",
+                                      "content": f"# {today}\n\n- Set up crash reporting.\n"})
+        ids[f"note:personal/{DAYBREAK}/log/{today}.md"] = made["note"]["id"]
         a.title("✳ Set up crash reporting")

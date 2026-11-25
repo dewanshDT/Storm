@@ -180,9 +180,11 @@ BOARD-style task list with checklists — two daily notes and a reading note;
 a `work` vault with two notes; no real names, IPs, emails or employers), then
 copies the output into `apps/www/public/screens/` and `docs/screenshots/`.
 `public.py` seeds two `storm-runtime` hosts, a 3-member crew, a loose running
-and a loose ended session, and one more session launched against
-`Launch plan.md` that reads it and, through the gateway, edits BOARD and
-writes a log note — the one real agent write the set shows.
+and a loose ended session, and one more session (`launch-plan`) launched
+against `Launch plan.md` that reads it and, through the gateway, edits BOARD
+and writes a log note (dated the run's own day) — the one real agent write
+the set shows. `build-vm`'s third workspace, `daybreak`, is left empty, for
+the launcher shot's Where.
 
 | Shot | What it shows |
 |---|---|
@@ -194,7 +196,7 @@ writes a log note — the one real agent write the set shows.
 | `desktop-palette` | ⌘K open on a query matching notes in both vaults |
 | `phone-agents` | The Agents list |
 | `phone-note-read` | BOARD in Read mode, with checklists |
-| `phone-note-edit` | BOARD in Edit mode (the toolbar needs a real keyboard — see below) |
+| `phone-note-edit` | BOARD in Edit mode, as plain Markdown source |
 | `phone-place-picker` | The place picker: vaults and "N running" |
 
 The site's `note-edited-by-session.webp` and `phone-agents.webp` are this
@@ -203,20 +205,25 @@ set's shots of the same names; `session-running.webp` is **not** regenerated
 `desktop-note-edited-by-session`, and its phone row is `phone-agents`,
 `phone-note-read`, `phone-note-edit` and `phone-place-picker`.
 
-**Terminal honesty (spec §3).** The stand-in agent (`agent.py`) never prints
-text imitating Claude Code's or OpenCode's own interface, and no public shot
-is a terminal close-up of the stand-in: every session in this set is shown
-through the inspector (Context, Wrote, About) or a list, never its terminal.
+**Terminal honesty (spec §3).** Every session in this set is labelled Claude
+Code, so any stand-in output would read as Claude Code's own: `public.py`
+launches every host with `silent=True` (`agents.Host`), which writes a
+provider `env_file` (0600) setting `STORM_PUBLIC_SILENT`, and `agent.py`
+checks it to skip its startup lines (`$ claude`, `› starting in …`) and the
+`›` prompt. `public.py` itself calls only `a.title(...)` — never `a.say(...)`,
+which would print to the terminal. The result is an empty terminal with just
+the cursor; titles still name sessions, and the Wrote inspector lists the
+real writes. No public shot is a terminal close-up of the stand-in either
+way: every session is shown through the inspector (Context, Wrote, About) or
+a list.
 
-**`phone-note-edit` has no formatting toolbar.** `EditorToolbar` shows only
-while `keyboardIsOpen` (`MediaQuery.viewInsets.bottom > 0`), which only a real
-on-screen keyboard sets. Headless Chromium has none: a tried fake (shrinking
-`window.visualViewport` and dispatching its `resize`) just shrinks Flutter's
-whole canvas to match — the glass pane is bound to `visualViewport` directly,
-not translated into an inset — so the shot shows Edit mode without the
-toolbar. Capturing it for real needs either a manual phone/responsive-mode
-capture (as `session-running` already is) or a product-side affordance to
-force the toolbar on; flagged for the vault rather than built here.
+**`phone-note-edit` has no formatting toolbar, by design.** `EditorToolbar`
+shows only while `keyboardIsOpen` (`MediaQuery.viewInsets.bottom > 0`), which
+only a real on-screen keyboard sets — headless Chromium has none, and a tried
+fake (shrinking `window.visualViewport` and dispatching its `resize`) just
+shrinks Flutter's whole canvas to match rather than producing an inset. The
+shot is accepted as Edit mode showing plain Markdown source, which is a fine
+thing to show; this is not on the manual-capture list.
 
 **The manual shot.** `session-running` needs a real, signed-in Claude Code
 session, which the harness cannot start (no login on this host, and a real

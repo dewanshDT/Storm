@@ -36,7 +36,7 @@ def wait(fn, timeout, what):
 
 
 class Host:
-    def __init__(self, world, name, workspaces):
+    def __init__(self, world, name, workspaces, silent=False):
         self.world = world
         self.name = name
         self.state = os.path.join(world.tmp, f"host-{name}")
@@ -45,6 +45,16 @@ class Host:
             os.makedirs(os.path.join(self.roots, ws), exist_ok=True)
         self.config = os.path.join(world.tmp, f"runtime-{name}.toml")
         agent = os.path.join(HERE, "agent.py")
+        # Public set only (terminal honesty, spec §3): a provider env_file
+        # (0600, as runtime.toml requires) sets STORM_PUBLIC_SILENT, which
+        # agent.py reads to keep its stand-in terminal empty.
+        env_line = ""
+        if silent:
+            env_file = os.path.join(world.tmp, f"silent-{name}.env")
+            with open(env_file, "w") as f:
+                f.write("STORM_PUBLIC_SILENT=1\n")
+            os.chmod(env_file, 0o600)
+            env_line = f'env_file = "{env_file}"\n'
         with open(self.config, "w") as f:
             f.write(f"""workspace_roots = ["{self.roots}"]
 forbidden_roots = ["{os.path.join(world.tmp, 'state')}", "{os.path.join(world.tmp, 'vaults')}"]
@@ -54,12 +64,12 @@ max_sessions = 8
 id = "claude-code"
 command = "{sys.executable}"
 args = ["{agent}"]
-
+{env_line}
 [[providers]]
 id = "opencode"
 command = "{sys.executable}"
 args = ["{agent}"]
-
+{env_line}
 [[providers]]
 id = "shell"
 command = "/bin/sh"

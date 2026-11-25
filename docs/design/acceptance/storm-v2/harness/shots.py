@@ -246,9 +246,12 @@ PUBLIC = [
          route=f"/v/{P}/note/{D_BOARD}", fresh=True, settle=2.5),
     dict(name="public/desktop-note-start-session", viewport="desktop", route=f"/v/{P}/browse",
          fresh=True, actions=opened_personal(D_DAILY1, D_DAILY2, D_READING, D_RELEASE)),
-    # The launcher sheet, opened but never launched.
+    # The launcher sheet, opened but never launched. Where: daybreak on
+    # build-vm, picked explicitly — it's the one workspace no seeded session
+    # uses, so the "another session is working here" line doesn't show.
     dict(name="public/desktop-launcher", viewport="desktop", route=f"/v/{P}/note/{D_PLAN}",
-         fresh=True, actions=[("tap", "^Start session$"), ("wait", 1.5)], settle=2.0),
+         fresh=True, actions=[("tap", "^Start session$"), ("wait", 1.5),
+                              ("tap", "^Where: "), ("tap", "^daybreak$")], settle=2.0),
     dict(name="public/desktop-session-wrote", viewport="desktop",
          route="/agents/s/{session:launch-plan}?tab=wrote", fresh=True, settle=2.0),
     dict(name="public/desktop-agents-crew", viewport="desktop", route="/agents", fresh=True,
