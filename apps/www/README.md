@@ -19,9 +19,11 @@ Milestone **M27** (vault: *Storm/Website/Website v2 — Plan*; decision 107).
 `src/data/facts.json`. The vault's *Storm Website* notes are an index and the
 rules, not a second copy of the prose; `docs/www/` is gone.
 
-Screenshots in `public/screens/` are real app renders from the v2 acceptance
-set (`docs/design/acceptance/storm-v2/`), converted to WebP. Check what a
-fixture note *says* before using one: an acceptance note's text can describe
+Screenshots in `public/screens/` are real app renders, captured straight to
+WebP by the acceptance harness's `public` set (`make shots-public` at the
+repo root; `docs/design/acceptance/storm-v2/README.md`). `session-running`
+is the one exception — a manual capture, documented there. Check what a
+fixture note *says* before using one: a demo-fixture note's text can describe
 behaviour that has since changed.
 
 ## Releases

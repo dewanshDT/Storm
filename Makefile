@@ -590,6 +590,30 @@ deploy-check:
 codegen:
 	cd $(CLIENT) && dart run build_runner build
 
+## shots-public: rebuild + capture the public screenshot set (README, site, blog) as WebP
+#
+# Builds what the harness needs, then shoot.py --set public --fixture demo
+# --format webp against docs/design/acceptance/storm-v2/harness/fixture-demo.
+# Writes every shot to docs/design/acceptance/storm-v2/public/, copies the
+# site's three named shots into apps/www/public/screens/ and the README set
+# into docs/screenshots/. session-running.webp is the one manual shot (see
+# the harness README) and is never touched here.
+ACCEPTANCE := docs/design/acceptance/storm-v2
+shots-public:
+	cd $(SERVER) && cargo build --quiet
+	cd $(RUNTIME) && cargo build --quiet
+	cd $(CLIENT) && flutter build web --release
+	python3 $(ACCEPTANCE)/harness/shoot.py --set public --fixture demo --format webp
+	cp $(ACCEPTANCE)/public/desktop-note-edited-by-session.webp apps/www/public/screens/note-edited-by-session.webp
+	cp $(ACCEPTANCE)/public/phone-agents.webp apps/www/public/screens/phone-agents.webp
+	cp $(ACCEPTANCE)/public/desktop-note-edited-by-session.webp docs/screenshots/desktop-note-edited-by-session.webp
+	cp $(ACCEPTANCE)/public/phone-agents.webp docs/screenshots/phone-agents.webp
+	cp $(ACCEPTANCE)/public/phone-note-read.webp docs/screenshots/phone-note-read.webp
+	cp $(ACCEPTANCE)/public/phone-note-edit.webp docs/screenshots/phone-note-edit.webp
+	cp $(ACCEPTANCE)/public/phone-place-picker.webp docs/screenshots/phone-place-picker.webp
+	@echo "  wrote $(ACCEPTANCE)/public/, apps/www/public/screens/, docs/screenshots/"
+	@echo "  (session-running.webp is the manual shot — left alone)"
+
 ## www: build the marketing site (apps/www → dist)
 www:
 	cd $(WWW) && npm ci && npm run build
@@ -643,6 +667,6 @@ clean:
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
-        dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
+        dry-run server client app-linux web serve-web www www-dev www-check www-facts shots-public formula-check codegen clean \
         deploy-web deploy-web-check installer-check test-release-channel test-apt-repo-build \
         build-server deploy deploy-check
