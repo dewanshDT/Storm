@@ -307,6 +307,17 @@ detect_user_install() {
   [ -e "$NEW_UNIT_OR_PLIST" ] && USER_INSTALL_EXISTS=1 || USER_INSTALL_EXISTS=0
 }
 
+# A user unit over the apt .deb runs the package's /usr/bin binary in place,
+# so there is no copy in ~/.local/bin to call.
+resolve_new_bin() {
+  [ -x "$NEW_BIN" ] && return 0
+  if [ "$OS" = linux ] && [ -x "$ROOT/usr/bin/storm-runtime" ]; then
+    NEW_BIN="$ROOT/usr/bin/storm-runtime"
+  elif command -v storm-runtime >/dev/null 2>&1; then
+    NEW_BIN=$(command -v storm-runtime)
+  fi
+}
+
 # workspace sizes ------------------------------------------------------
 
 WS_NAMES=""      # newline-separated workspace directory names found
@@ -798,7 +809,9 @@ do_copy_claude_memory() {
 chown_with_progress() {
   path=$1
   [ -e "$path" ] || return 0
-  total=$(spin_run "counting files under $(basename "$path")" sh -c "find '$path' | wc -l" | tr -d ' ')
+  # sudo: the moved trees still carry the service account's 0700 modes, so
+  # an unprivileged find can't descend into them and would skip most files.
+  total=$(spin_run "counting files under $(basename "$path")" sudo sh -c "find '$path' | wc -l" | tr -d ' ')
   [ -n "$total" ] && [ "$total" -gt 0 ] || { sudo chown -R "$ME" "$path"; return 0; }
 
   count_file=$(mktemp)
@@ -808,7 +821,7 @@ chown_with_progress() {
 
   export COUNT_FILE="$count_file"
   # shellcheck disable=SC2016  # expanded by the inner sh -c, not here
-  ( find "$path" -print0 \
+  ( sudo find "$path" -print0 \
     | xargs -0 -n 2000 sh -c '
         owner=$1; shift
         sudo chown "$owner" "$@" 2>/dev/null
@@ -980,6 +993,7 @@ do_add_workspace_root() {
 
 do_enroll() {
   step_begin "Enroll and start the new host"
+  resolve_new_bin
   if step_done "enroll"; then
     step_skip "already enrolled"
   else
