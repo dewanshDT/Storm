@@ -435,7 +435,11 @@ old_home_readable() {
 collect_toolchains() {
   FOUND_TOOLCHAINS=""
   [ "$OS" = linux ] || return 0
-  [ -d "$OLD_HOME" ] || return 0
+  if [ "$OPT_DRY_RUN" = 1 ]; then
+    [ -d "$OLD_HOME" ] || { [ -e "$(dirname "$OLD_HOME")" ] && OLD_HOME_UNREADABLE=1; return 0; }
+  else
+    sudo test -d "$OLD_HOME" 2>/dev/null || return 0
+  fi
   if [ "$OPT_DRY_RUN" = 1 ]; then
     if ! old_home_readable; then
       OLD_HOME_UNREADABLE=1
@@ -490,7 +494,24 @@ $name"
 }
 
 SAME_FS=1
+BTRFS_SUBVOL=0
 FREE_SPACE_KB=0
+
+fs_source() {
+  if [ "$OPT_DRY_RUN" != 1 ]; then
+    sudo df -P "$1" 2>/dev/null | awk 'NR==2{print $1}'
+  else
+    df -P "$1" 2>/dev/null | awk 'NR==2{print $1}'
+  fi
+}
+
+fs_type() {
+  if [ "$OPT_DRY_RUN" != 1 ]; then
+    sudo stat -f -c %T "$1" 2>/dev/null
+  else
+    stat -f -c %T "$1" 2>/dev/null
+  fi
+}
 
 check_filesystem_and_space() {
   SAME_FS=1
@@ -502,7 +523,17 @@ check_filesystem_and_space() {
     done
     old_dev=$(dev_of "$first_root")
     new_dev=$(dev_of "$dest_probe")
-    [ "$old_dev" = "$new_dev" ] || SAME_FS=0
+    if [ "$old_dev" != "$new_dev" ]; then
+      # btrfs gives every subvolume its own st_dev, so /var and /home differ
+      # on one disk. There mv falls back to a copy that reflinks: no extra
+      # space, near-instant. Same block device + btrfs = treat as same.
+      if [ "$(fs_source "$first_root")" = "$(fs_source "$dest_probe")" ] &&
+        [ "$(fs_type "$first_root")" = btrfs ]; then
+        BTRFS_SUBVOL=1
+      else
+        SAME_FS=0
+      fi
+    fi
   fi
   dest_probe=$OPT_DEST
   while [ ! -d "$dest_probe" ] && [ "$dest_probe" != "/" ]; do
@@ -546,7 +577,11 @@ print_plan() {
   fi
   say "  Destination: $OPT_DEST"
   if [ "$SAME_FS" = 1 ]; then
-    say "  Filesystem: same as destination (move will be instant renames)"
+    if [ "$BTRFS_SUBVOL" = 1 ]; then
+      say "  Filesystem: same btrfs disk, different subvolume (move is a reflink copy: fast, no extra space)"
+    else
+      say "  Filesystem: same as destination (move will be instant renames)"
+    fi
   else
     if [ "$OPT_ALLOW_COPY" = 1 ]; then
       say "  Filesystem: DIFFERENT from destination — will rsync-copy (--allow-copy)"
@@ -727,7 +762,16 @@ move_one_workspace() {
     die "refusing to overwrite existing destination: $dst"
   fi
   mkdir -p "$OPT_DEST"
-  if [ "$SAME_FS" = 1 ]; then
+  if [ "$BTRFS_SUBVOL" = 1 ]; then
+    # --reflink=always shares extents (no data copied) or fails outright;
+    # the source goes only after the clone completed.
+    if sudo cp -a --reflink=always "$src" "$dst"; then
+      sudo rm -rf "$src"
+    else
+      sudo rm -rf "$dst"
+      die "reflink copy of $src failed; nothing was removed from $src_root"
+    fi
+  elif [ "$SAME_FS" = 1 ]; then
     sudo mv "$src" "$dst"
   elif [ "$OPT_ALLOW_COPY" = 1 ]; then
     sudo rsync -a --info=progress2 "$src"/ "$dst"/
@@ -752,7 +796,9 @@ do_move_workspaces() {
   n=1
   for name in $WS_NAMES; do
     root=$(printf '%s\n' "$WS_ROOT_FOR" | sed -n "${n}p")
-    if [ "$SAME_FS" = 1 ]; then
+    if [ "$BTRFS_SUBVOL" = 1 ]; then
+      say "    $name: btrfs subvolume to subvolume, reflink copy..."
+    elif [ "$SAME_FS" = 1 ]; then
       say "    $name: same filesystem, instant rename"
     fi
     move_one_workspace "$name" "$root"
@@ -782,7 +828,13 @@ do_move_toolchains() {
       note "    keeping your own $d"
     else
       mkdir -p "$(dirname "$HOME/$d")"
-      sudo mv "$OLD_HOME/$d" "$HOME/$d"
+      if [ "$BTRFS_SUBVOL" = 1 ]; then
+        sudo cp -a --reflink=always "$OLD_HOME/$d" "$HOME/$d" ||
+          { sudo rm -rf "$HOME/$d"; die "reflink copy of $d failed; the original is untouched"; }
+        sudo rm -rf "${OLD_HOME:?}/$d"
+      else
+        sudo mv "$OLD_HOME/$d" "$HOME/$d"
+      fi
       say "    moved $d"
     fi
     IFS='
