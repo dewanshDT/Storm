@@ -471,6 +471,12 @@ def _atomic_write_json(path, data):
             json.dump(data, f)
             f.write("\n")
         os.chmod(tmp, 0o600)
+        # `pair` runs as root; the unit's DynamicUser owns the state dir and
+        # must still be able to read what root wrote there.
+        if os.geteuid() == 0:
+            st = os.stat(os.path.dirname(path))
+            if st.st_uid != 0:
+                os.chown(tmp, st.st_uid, st.st_gid)
         os.replace(tmp, path)
     except Exception:
         try:
