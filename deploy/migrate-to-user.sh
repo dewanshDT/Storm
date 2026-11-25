@@ -230,13 +230,23 @@ OLD_SERVICE_ACCOUNT=""
 OLD_WORKSPACE_ROOTS=""  # newline-separated
 
 dev_of() {
-  stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null
+  if [ "$OPT_DRY_RUN" != 1 ]; then
+    sudo stat -c %d "$1" 2>/dev/null || sudo stat -f %d "$1" 2>/dev/null
+  else
+    stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null
+  fi
 }
 
 parse_workspace_roots() {
   cfg=$1
-  [ -f "$cfg" ] || return 0
-  grep -E '^[[:space:]]*workspace_roots[[:space:]]*=' "$cfg" | head -1 \
+  if [ -r "$cfg" ]; then
+    text=$(cat "$cfg")
+  elif [ "$OPT_DRY_RUN" != 1 ] && sudo test -f "$cfg" 2>/dev/null; then
+    text=$(sudo cat "$cfg")
+  else
+    return 0
+  fi
+  printf '%s\n' "$text" | grep -E '^[[:space:]]*workspace_roots[[:space:]]*=' | head -1 \
     | grep -o '"[^"]*"' | sed 's/^"//; s/"$//'
 }
 
@@ -323,6 +333,7 @@ resolve_new_bin() {
 WS_NAMES=""      # newline-separated workspace directory names found
 WS_SIZES=""      # matching newline-separated human sizes
 WS_ROOT_FOR=""   # matching newline-separated source root for each name
+WS_UNLISTABLE="" # dry run only: roots it couldn't list without sudo
 
 # Sized with sudo normally; --dry-run must never prompt for sudo or change
 # anything, so it tries a plain du and says so when it can't read enough to
@@ -350,9 +361,26 @@ collect_workspaces() {
 '
   for root in $OLD_WORKSPACE_ROOTS; do
     IFS=$old_ifs
-    [ -d "$root" ] || continue
-    for entry in "$root"/*; do
-      [ -d "$entry" ] || continue
+    # The service's roots are 0700 to its own account: list them with sudo,
+    # or (dry run, no sudo) say they couldn't be listed rather than "none".
+    if [ "$OPT_DRY_RUN" = 1 ]; then
+      if [ ! -r "$root" ] || [ ! -x "$root" ]; then
+        WS_UNLISTABLE="$WS_UNLISTABLE
+$root"
+        IFS='
+'
+        continue
+      fi
+      entries=$(find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    else
+      sudo test -d "$root" 2>/dev/null || { IFS='
+'; continue; }
+      entries=$(sudo find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    fi
+    IFS='
+'
+    for entry in $entries; do
+      IFS=$old_ifs
       name=$(basename "$entry")
       size=$(measure_dir_size "$entry" "$name")
       WS_NAMES="$WS_NAMES
@@ -462,7 +490,7 @@ FREE_SPACE_KB=0
 check_filesystem_and_space() {
   SAME_FS=1
   first_root=$(printf '%s\n' "$OLD_WORKSPACE_ROOTS" | head -1)
-  if [ -d "$first_root" ]; then
+  if [ -d "$first_root" ] || { [ "$OPT_DRY_RUN" != 1 ] && sudo test -d "$first_root" 2>/dev/null; }; then
     dest_probe=$OPT_DEST
     while [ ! -d "$dest_probe" ] && [ "$dest_probe" != "/" ]; do
       dest_probe=$(dirname "$dest_probe")
@@ -506,6 +534,8 @@ print_plan() {
       n=$((n + 1))
     done
     IFS=$old_ifs
+  elif [ -n "$WS_UNLISTABLE" ]; then
+    say "  Workspaces found: (needs sudo to list: $(printf '%s' "$WS_UNLISTABLE" | sed '/^$/d' | tr '\n' ' '))"
   else
     say "  Workspaces found: none"
   fi
