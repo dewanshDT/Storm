@@ -8,12 +8,15 @@
 # STORM_INSTALL_TEST=1, which defines its functions and runs nothing.
 
 INSTALLER="$BATS_TEST_DIRNAME/../../deploy/install.sh"
+MIGRATE="$BATS_TEST_DIRNAME/../../deploy/migrate-to-user.sh"
 FAKE_SRC="$BATS_TEST_DIRNAME/fake/fake.sh"
 
-# Real tools the installer and the fakes may use.
+# Real tools the installer and the fakes may use. du, xargs, rsync, rev and
+# df are migrate-to-user.sh's own (progress sizing, batched chown, --allow-copy,
+# commify, free-space reporting); install.sh never calls them.
 REAL_TOOLS="bash sh cat sed awk grep head tail tr cut date dirname basename mkdir rm cp mv ln
 chmod mktemp tar gzip sha256sum sleep kill env tee touch ls sort wc find printf
-test true false readlink stty tput"
+test true false readlink stty tput du xargs rsync rev df"
 
 # The fakes on PATH (id and stat only rename the user running the tests). storm-server and storm-runtime are not: like the real
 # ones, they appear when a fake apt-get or a fake `up`/`install` puts them there.
@@ -65,6 +68,52 @@ setup_world() {
   # Read by the sourced installer: don't wait between polls.
   # shellcheck disable=SC2034
   POLL_SLEEP=0 HEALTH_TRIES=2
+}
+
+# Same scratch world as setup_world, but for deploy/migrate-to-user.sh:
+# STORM_MIGRATE_TEST=1 instead of sourcing install.sh (migrate.bats tests
+# call its functions directly, or run the whole script with `run`).
+setup_migrate_world() {
+  local t n p
+  t=$BATS_TEST_TMPDIR
+  FAKE_REAL_USER=$(id -un)
+  FAKE_REAL_ID=$(type -P id)
+  FAKE_REAL_STAT=$(type -P stat)
+  export FAKE_DIR="$t/fake"
+  export FAKE_LOG="$FAKE_DIR/argv.log"
+  export FAKE_STDIN="$FAKE_DIR/stdin.log"
+  mkdir -p "$FAKE_DIR/bin" "$FAKE_DIR/installed" "$FAKE_DIR/tools" "$t/sysbin" "$t/home" "$t/sysroot"
+  : >"$FAKE_LOG"
+  : >"$FAKE_STDIN"
+  cp "$FAKE_SRC" "$FAKE_DIR/fake.sh"
+  chmod 0755 "$FAKE_DIR/fake.sh"
+  for n in $FAKE_TOOLS; do ln -s "$FAKE_DIR/fake.sh" "$FAKE_DIR/bin/$n"; done
+  for n in $REAL_TOOLS; do
+    p=$(type -P "$n" 2>/dev/null) || continue
+    case "$p" in /*) ln -sf "$p" "$t/sysbin/$n" ;; esac
+  done
+  export PATH="$FAKE_DIR/bin:$FAKE_DIR/installed:$t/sysbin"
+  export HOME="$t/home"
+  unset XDG_STATE_HOME XDG_DATA_HOME XDG_CONFIG_HOME
+  export STORM_MIGRATE_TEST=1
+  export STORM_TEST_SYSROOT="$t/sysroot"
+  export STORM_TTY="$t/no-tty/tty"
+  export NO_COLOR=1 LANG=C.UTF-8 TERM=dumb
+  export FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64
+  export FAKE_USER=tester FAKE_REAL_USER FAKE_REAL_ID FAKE_REAL_STAT
+  unset FAKE_SUDO_DENIED FAKE_SYSTEMCTL_WONT_STOP
+  # Real runs keep sudo warm every 60s and poll for 30s at 1s intervals;
+  # tests don't wait on either.
+  export STORM_MIGRATE_SUDO_KEEPALIVE_INTERVAL=0
+  export STORM_MIGRATE_STOP_WAIT_SLEEP=0
+  # shellcheck disable=SC1090
+  source "$MIGRATE"
+}
+
+# Real git on PATH instead of fake.sh's (which only handles `clone`), for a
+# test that needs real `git worktree repair`/`prune` behaviour.
+use_real_git() {
+  ln -sf "$(type -P git)" "$FAKE_DIR/bin/git"
 }
 
 os_release() {

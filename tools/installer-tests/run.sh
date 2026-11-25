@@ -13,6 +13,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 installer="$root/deploy/install.sh"
+migrate="$root/deploy/migrate-to-user.sh"
 SHELLCHECK=${SHELLCHECK:-shellcheck}
 BATS=${BATS:-bats}
 
@@ -38,6 +39,8 @@ echo "== shellcheck (the body's line N is install.sh line N+$start)"
 "$SHELLCHECK" -s sh "$installer"
 "$SHELLCHECK" -s bash "$installer"
 "$SHELLCHECK" -s bash "$tmp/install-body.bash"
+# migrate-to-user.sh is plain sh throughout (no bash-body heredoc to extract).
+"$SHELLCHECK" -s sh "$migrate"
 "$SHELLCHECK" -s bash "$here/helpers.bash" "$here/fake/fake.sh" "$here/run.sh"
 # The nightly backup has no bats suite (apps/server/tests/backup_root.rs drives
 # it against the real binary); it is linted here, the one job with the linter.

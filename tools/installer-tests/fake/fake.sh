@@ -13,7 +13,8 @@
 # channel's /releases?per_page=30 body; default: one release, FAKE_LATEST),
 # FAKE_ASSETS, FAKE_DIR,
 # STORM_TEST_SYSROOT, FAKE_IP4_LINK, FAKE_IP6 (the routing table),
-# FAKE_FIREWALLD, FAKE_FIREWALLD_ZONES, FAKE_SUDO_DENIED.
+# FAKE_FIREWALLD, FAKE_FIREWALLD_ZONES, FAKE_SUDO_DENIED,
+# FAKE_SYSTEMCTL_WONT_STOP (migrate-to-user.sh's stop-verification wait).
 
 name=${0##*/}
 self=$0
@@ -262,7 +263,23 @@ case "$name" in
   systemctl)
     [ "${1:-}" = --user ] && shift
     case "${1:-}" in
-      is-active) exit "${FAKE_RUNTIME_INACTIVE:-0}" ;;
+      disable)
+        # A real disable --now takes effect; FAKE_SYSTEMCTL_WONT_STOP
+        # simulates a unit stuck active (migrate-to-user.sh's wait loop).
+        [ -n "${FAKE_SYSTEMCTL_WONT_STOP:-}" ] || echo inactive >"$FAKE_DIR/systemctl-state"
+        ;;
+      is-active)
+        if [ -f "$FAKE_DIR/systemctl-state" ]; then
+          state=$(cat "$FAKE_DIR/systemctl-state")
+        elif [ -n "${FAKE_RUNTIME_INACTIVE:-}" ]; then
+          state=inactive
+        else
+          state=active
+        fi
+        echo "$state"
+        [ "$state" = active ] && exit 0
+        exit "${FAKE_RUNTIME_INACTIVE:-3}"
+        ;;
     esac
     exit 0
     ;;
