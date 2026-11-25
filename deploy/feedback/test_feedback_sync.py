@@ -328,6 +328,39 @@ class StateAndCredsTests(unittest.TestCase):
         self.assertEqual(loaded.device_secret, "s3cr3t")
         self.assertEqual(loaded.refresh_token, "rt")
 
+    def _save_as(self, euid, dir_uid):
+        from unittest import mock
+
+        os.makedirs(self.state_dir)
+        real_stat = os.stat
+
+        def fake_stat(p, *a, **kw):
+            st = real_stat(p, *a, **kw)
+            if p == self.state_dir:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                       dir_uid, dir_uid + 1, st.st_size,
+                                       st.st_atime, st.st_mtime, st.st_ctime))
+            return st
+
+        creds = fs.DeviceCreds(device_id="d", device_secret="s", server_id="srv_x")
+        with mock.patch.object(fs.os, "geteuid", return_value=euid), \
+                mock.patch.object(fs.os, "stat", side_effect=fake_stat), \
+                mock.patch.object(fs.os, "chown") as chown:
+            creds.save(self.state_dir)
+        return chown
+
+    def test_root_save_takes_the_state_dirs_owner(self):
+        # A re-pair as root must stay readable by the unit's DynamicUser.
+        chown = self._save_as(euid=0, dir_uid=61499)
+        chown.assert_called_once()
+        self.assertEqual(chown.call_args.args[1:], (61499, 61500))
+
+    def test_root_save_into_a_root_dir_leaves_ownership(self):
+        self._save_as(euid=0, dir_uid=0).assert_not_called()
+
+    def test_unprivileged_save_never_chowns(self):
+        self._save_as(euid=1000, dir_uid=61499).assert_not_called()
+
     def test_device_creds_missing_is_none(self):
         self.assertIsNone(fs.DeviceCreds.load(self.state_dir))
 

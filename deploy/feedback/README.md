@@ -54,6 +54,10 @@ password again).
 A pairing code is a one-time nonce and expires in a few minutes; if it's
 expired or already used, get a fresh one from the app and run `pair` again.
 
+If the device is revoked in the app, pair again the same way; the timer
+needs no change. The new credential takes the state directory's owner, so
+the unit's transient user can still read it.
+
 ## Enable
 
 Nothing above enables or starts anything. Once paired:
