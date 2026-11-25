@@ -90,6 +90,7 @@ jobs:
               - *diag_crate
             installer:
               - deploy/install.sh
+              - deploy/migrate-to-user.sh
               - deploy/storm-backup.sh
               - deploy/runtime-tarball.sh
               - tools/installer-tests/**
