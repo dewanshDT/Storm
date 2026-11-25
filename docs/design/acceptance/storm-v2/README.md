@@ -155,6 +155,105 @@ Captured 2026-10-25 on `feat/138-6-crews-finish`. The scripted agent stands
 in for Claude Code (and so every agent mark is Claude Code's); the 4l frame's
 sheet also lists Already ended (decision note, As built in 138-5).
 
+## The public set (`--set public`, `make shots-public`)
+
+README, website and blog screenshots, regenerated from the current build in
+one command, as WebP. Unlike every set above, this one is not a record of
+past acceptance against a design handoff — it is live documentation, meant
+to be re-run whenever the UI it shows changes.
+
+```sh
+make shots-public
+```
+
+runs, in order: `cargo build` in `apps/server` and `apps/runtime`,
+`flutter build web --release` in `apps/client`, then
+
+```sh
+python3 docs/design/acceptance/storm-v2/harness/shoot.py \
+    --set public --fixture demo --format webp
+```
+
+against a second fixture, `harness/fixture-demo/vaults/` (a `personal` vault
+with a small habit-tracker project — a plan, a bug, a release checklist, a
+BOARD-style task list with checklists — two daily notes and a reading note;
+a `work` vault with two notes; no real names, IPs, emails or employers), then
+copies the output into `apps/www/public/screens/` and `docs/screenshots/`.
+`public.py` seeds two `storm-runtime` hosts, a 3-member crew, a loose running
+and a loose ended session, and one more session launched against
+`Launch plan.md` that reads it and, through the gateway, edits BOARD and
+writes a log note — the one real agent write the set shows.
+
+| Shot | What it shows |
+|---|---|
+| `desktop-note-edited-by-session` | BOARD, edited by the launch-plan session (the hero) |
+| `desktop-note-start-session` | A note with Start session visible, vault tree, recents |
+| `desktop-launcher` | The launcher opened from a note (From · Agent · Where), never launched |
+| `desktop-session-wrote` | The launch-plan session's Wrote tab |
+| `desktop-agents-crew` | The Agents sidebar: a crew of 3, a loose running and a loose ended session, two hosts |
+| `desktop-palette` | ⌘K open on a query matching notes in both vaults |
+| `phone-agents` | The Agents list |
+| `phone-note-read` | BOARD in Read mode, with checklists |
+| `phone-note-edit` | BOARD in Edit mode (the toolbar needs a real keyboard — see below) |
+| `phone-place-picker` | The place picker: vaults and "N running" |
+
+The site's `note-edited-by-session.webp` and `phone-agents.webp` are this
+set's shots of the same names; `session-running.webp` is **not** regenerated
+— it is a manual capture (below). The README's hero is
+`desktop-note-edited-by-session`, and its phone row is `phone-agents`,
+`phone-note-read`, `phone-note-edit` and `phone-place-picker`.
+
+**Terminal honesty (spec §3).** The stand-in agent (`agent.py`) never prints
+text imitating Claude Code's or OpenCode's own interface, and no public shot
+is a terminal close-up of the stand-in: every session in this set is shown
+through the inspector (Context, Wrote, About) or a list, never its terminal.
+
+**`phone-note-edit` has no formatting toolbar.** `EditorToolbar` shows only
+while `keyboardIsOpen` (`MediaQuery.viewInsets.bottom > 0`), which only a real
+on-screen keyboard sets. Headless Chromium has none: a tried fake (shrinking
+`window.visualViewport` and dispatching its `resize`) just shrinks Flutter's
+whole canvas to match — the glass pane is bound to `visualViewport` directly,
+not translated into an inset — so the shot shows Edit mode without the
+toolbar. Capturing it for real needs either a manual phone/responsive-mode
+capture (as `session-running` already is) or a product-side affordance to
+force the toolbar on; flagged for the vault rather than built here.
+
+**The manual shot.** `session-running` needs a real, signed-in Claude Code
+session, which the harness cannot start (no login on this host, and a real
+agent's output is non-deterministic) — so it stays a manual capture:
+
+```sh
+python3 docs/design/acceptance/storm-v2/harness/shoot.py \
+    --set public --fixture demo --keep
+```
+
+`--keep` leaves the run's temp root (vaults + state) on disk; the log line
+`server up at http://127.0.0.1:7481 (state in …)` names it, but `close()`
+still stops the server process at exit. Restart one against that same root:
+
+```sh
+apps/server/target/debug/storm-server serve --mcp \
+    --vault-root <tmp>/vaults --state <tmp>/state --port 7481 \
+    --web apps/client/build/web
+```
+
+Open `http://127.0.0.1:7481`, sign in (`storm` / `correct horse battery
+staple` — `storm_auth.PASSWORD`), start a real Claude Code session from a
+note, and once it is running capture the Agents view at 1280×800, 2× (DPR),
+saved as `apps/www/public/screens/session-running.webp`.
+
+**Known stale against today's client.** `current`, `v2` and `crews` predate
+decisions 153/156/160/163 (the app bar, inspector rail, launcher, ⌘K
+palette, themes); several of their selectors (`^Workspace: `, for one — the
+launcher now reads `^Where: `) no longer match and those sets will not run
+clean. They are records of past acceptance and are left as they are, per the
+spec: fixing them was out of scope for this slice. One correctness bug found
+along the way, also left alone for the same reason: `agents.py`'s `run_loop`
+reads `session_context`'s result as `context.get("content")`, but the real
+shape nests it a level down (`context["context"]["content"]`) — the check
+always raises today. `public.py`'s own `session_context` check (`seed()`)
+uses the correct shape.
+
 ## Deliberate, documented deltas
 
 Filled in as slices land (for example: the real xterm surface instead of the

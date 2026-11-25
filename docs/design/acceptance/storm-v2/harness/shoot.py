@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(ROOT, "apps/server/tests"))
 import agents  # noqa: E402
 import cdp  # noqa: E402
 import crews  # noqa: E402
+import public  # noqa: E402
 import shots  # noqa: E402
 import storm_auth  # noqa: E402
 
@@ -134,15 +135,18 @@ def wait_for(fn, timeout, what):
 
 
 class Harness:
-    def __init__(self, out_dir, keep):
+    def __init__(self, out_dir, keep, fixture="fixture", image_format="png"):
         self.out = out_dir
         self.keep = keep
+        self.fixture = fixture
+        self.format = image_format
         self.tmp = tempfile.mkdtemp(prefix="storm-acceptance-")
         self.procs = []
         self.ids = {}
         self.base = BASE
         self.world = None
         self.crew_world = None
+        self.public_world = None
         self.crew_checks = None
         self.last_wait = None
 
@@ -150,11 +154,14 @@ class Harness:
         return storm_auth._call(BASE, method, path, body, auth=self.session)
 
     def step(self, name):
-        """Moves the server's agent state on (see agents.py, crews.py)."""
+        """Moves the server's agent state on (see agents.py, crews.py, public.py)."""
         self.world = self.world or agents.AgentWorld(self)
         if name.startswith("crews"):
             self.crew_world = self.crew_world or crews.CrewWorld(self, self.world)
             getattr(self.crew_world, name.partition(":")[2] or "seed")()
+        elif name.startswith("public"):
+            self.public_world = self.public_world or public.PublicWorld(self, self.world)
+            getattr(self.public_world, name.partition(":")[2] or "seed")()
         else:
             {"hosts": self.world.enroll_hosts,
              "sessions": self.world.run_sessions,
@@ -165,7 +172,8 @@ class Harness:
 
     def start_server(self):
         vaults = os.path.join(self.tmp, "vaults")
-        shutil.copytree(os.path.join(HERE, "fixture/vaults"), vaults)
+        fixture_dir = "fixture" if self.fixture == "fixture" else f"fixture-{self.fixture}"
+        shutil.copytree(os.path.join(HERE, fixture_dir, "vaults"), vaults)
         self.server_log = os.path.join(self.tmp, "server.log")
         binary = os.path.join(ROOT, "apps/server/target/debug/storm-server")
         web = os.path.join(ROOT, "apps/client/build/web")
@@ -403,6 +411,26 @@ class Harness:
         self.settle(1.5)
         log(f"preset {wire}")
 
+    def open_palette_and_type(self, text):
+        """Opens the ⌘K palette and types a query. Same semantics-off need as
+        a login field (README): map the search button and the palette field
+        once with semantics on, reload (semantics off, same layout), then
+        replay both taps so the second click lands on Flutter's own input
+        rather than the accessibility one."""
+        search = self.find_text("^Search notes, sessions, commands$")
+        self.click(search["x"], search["y"])
+        self.settle(0.5)
+        field = next(i for i in self.page.eval("window.__storm.inputs()")
+                     if "Search notes, sessions, commands" in i["label"])
+        self.page.call("Page.reload")
+        self.wait_app()
+        wait_for(lambda: self.location() not in ("/starting", "/login"), 30, "the app")
+        self.settle(1.0)
+        self.click(search["x"], search["y"])
+        self.settle(0.5)
+        self.type_into(field["x"], field["y"], text)
+        self.settle(1.0)
+
     # ---- shots --------------------------------------------------------
 
     def shoot(self, shot):
@@ -438,6 +466,8 @@ class Harness:
                 self.wait_text(*arg)
             elif kind == "preset":
                 self.use_preset(arg)
+            elif kind == "palette":
+                self.open_palette_and_type(arg)
             elif kind == "hover":
                 hit = self.find_text(arg)
                 self.mouse("mouseMoved", hit["x"], hit["y"])
@@ -453,17 +483,38 @@ class Harness:
                     raise RuntimeError(f"seeding {method} {path} answered {status}")
         if shot.get("noshot"):
             return
-        if not any(kind in ("tap", "hover", "rightclick", "drag", "longpress")
+        if not any(kind in ("tap", "hover", "rightclick", "drag", "longpress", "palette")
                    for kind, _ in shot.get("actions", [])):
             # Park the pointer in a corner so no row is captured mid-hover.
             self.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=1, y=1)
         self.settle(shot.get("settle", 1.5))
-        png = self.page.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
-        path = os.path.join(self.out, shot["name"] + ".png")
+        path = os.path.join(self.out, shot["name"] + "." + self.format)
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = self.capture(path)
         with open(path, "wb") as fh:
-            fh.write(base64.b64decode(png["data"]))
+            fh.write(data)
         log(f"{shot['name']}: {self.location()} → {os.path.relpath(path, ROOT)}")
+
+    def capture(self, path):
+        """A screenshot in `self.format`. WebP is capped at about 300 KB
+        (the spec): on an oversized capture, quality steps down until it
+        fits or the floor is reached — logged either way."""
+        if self.format == "png":
+            shot = self.page.call("Page.captureScreenshot", format="png",
+                                  captureBeyondViewport=False)
+            return base64.b64decode(shot["data"])
+        for quality in (85, 75, 65, 55, 45):
+            shot = self.page.call("Page.captureScreenshot", format="webp", quality=quality,
+                                  captureBeyondViewport=False)
+            data = base64.b64decode(shot["data"])
+            if len(data) <= 300_000 or quality == 45:
+                if len(data) > 300_000:
+                    log(f"{os.path.basename(path)}: {len(data)} bytes at quality "
+                        f"{quality} — still over 300 KB")
+                elif quality != 85:
+                    log(f"{os.path.basename(path)}: {len(data)} bytes at quality {quality}")
+                return data
+        raise AssertionError("unreachable")
 
     def debug_dump(self):
         """On failure: what the page looked like, and what it offered."""
@@ -505,6 +556,8 @@ def main():
     ap.add_argument("--preset", default="", help="theme preset wire name, e.g. storm-light")
     ap.add_argument("--desktop-width", type=int, default=0, help="override 1280")
     ap.add_argument("--phone-width", type=int, default=0, help="override 390")
+    ap.add_argument("--fixture", default="fixture", help="fixture{-NAME}/vaults to seed from")
+    ap.add_argument("--format", default="png", choices=("png", "webp"), help="capture format")
     args = ap.parse_args()
     if args.desktop_width:
         VIEWPORTS["desktop"]["width"] = args.desktop_width
@@ -512,7 +565,8 @@ def main():
         VIEWPORTS["phone"]["width"] = args.phone_width
     only = tuple(args.only.split(","))
 
-    h = Harness(os.path.abspath(args.out), args.keep)
+    h = Harness(os.path.abspath(args.out), args.keep, fixture=args.fixture,
+                image_format=args.format)
     try:
         h.start_server()
         h.claim()

@@ -222,4 +222,49 @@ DESIGN = [
     dict(name="design-system/gallery", viewport="gallery", route="/gallery", settle=2.5),
 ]
 
-SETS = {"current": CURRENT, "v2": V2, "design": DESIGN, "crews": CREWS}
+# The public set (Screenshot refresh spec, 2026-11-25): README, site and blog
+# shots, against `--fixture demo` (fixture-demo/vaults, public.py's scene).
+# `P` above is reused — both fixtures name their vault "personal".
+DB = "projects/daybreak"
+D_PLAN = f"{{note:personal/{DB}/Launch plan.md}}"
+D_BOARD = f"{{note:personal/{DB}/BOARD.md}}"
+D_RELEASE = f"{{note:personal/{DB}/Release checklist.md}}"
+D_DAILY1 = "{note:personal/daily/2026-11-18.md}"
+D_DAILY2 = "{note:personal/daily/2026-11-19.md}"
+D_READING = "{note:personal/reading/Local-first software.md}"
+
+
+def opened_personal(*notes):
+    return [a for n in notes for a in (("go", f"/v/{P}/note/{n}"), ("wait", 2.5))]
+
+
+PUBLIC = [
+    dict(step="public"),
+    # The hero: BOARD, edited by the launch-plan session, properties open
+    # (the drawer defaults open at 1280 — CLAUDE.md, slice 9).
+    dict(name="public/desktop-note-edited-by-session", viewport="desktop",
+         route=f"/v/{P}/note/{D_BOARD}", fresh=True, settle=2.5),
+    dict(name="public/desktop-note-start-session", viewport="desktop", route=f"/v/{P}/browse",
+         fresh=True, actions=opened_personal(D_DAILY1, D_DAILY2, D_READING, D_RELEASE)),
+    # The launcher sheet, opened but never launched.
+    dict(name="public/desktop-launcher", viewport="desktop", route=f"/v/{P}/note/{D_PLAN}",
+         fresh=True, actions=[("tap", "^Start session$"), ("wait", 1.5)], settle=2.0),
+    dict(name="public/desktop-session-wrote", viewport="desktop",
+         route="/agents/s/{session:launch-plan}?tab=wrote", fresh=True, settle=2.0),
+    dict(name="public/desktop-agents-crew", viewport="desktop", route="/agents", fresh=True,
+         settle=2.5),
+    dict(name="public/desktop-palette", viewport="desktop", route=f"/v/{P}/browse", fresh=True,
+         actions=[("palette", "release")]),
+    dict(name="public/phone-agents", viewport="phone", route="/agents", fresh=True, settle=2.5),
+    dict(name="public/phone-note-read", viewport="phone", route=f"/v/{P}/note/{D_BOARD}",
+         fresh=True, settle=2.0),
+    # The toolbar needs `keyboardIsOpen` (MediaQuery.viewInsets.bottom > 0),
+    # which only a real on-screen keyboard sets; headless Chromium has none
+    # (see the harness README). This shows Edit mode; the toolbar is absent.
+    dict(name="public/phone-note-edit", viewport="phone", route=f"/v/{P}/note/{D_BOARD}",
+         fresh=True, actions=[("tap", "^Edit$")], settle=2.0),
+    dict(name="public/phone-place-picker", viewport="phone", route=f"/v/{P}/browse",
+         fresh=True, actions=[("tap", "^Places$")]),
+]
+
+SETS = {"current": CURRENT, "v2": V2, "design": DESIGN, "crews": CREWS, "public": PUBLIC}

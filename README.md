@@ -42,25 +42,20 @@ state lives in a sibling `state/` directory — never inside the vaults.
 
 ## Screenshots
 
-The macOS client in the wide-screen layout: vault tree, a note in read mode,
-and its typed properties.
+The web client at desktop width: a note edited by an agent session, its
+version line linking back to the session, and the properties panel open.
 
-<img src="docs/screenshots/desktop-wide.png" alt="The macOS client: sidebar with the vault's folder tree, the Global Todo note in read mode with rendered checklists, and the properties panel with tags and colour">
+<img src="docs/screenshots/desktop-note-edited-by-session.webp" alt="The Storm web client: a note in Read mode whose version line says it was edited by a session, the vault's folder tree in the sidebar, and the properties panel open with tags and colour">
 
-The Android client, in the SlowFlow earth and Storm dark themes.
+The Android client: the Agents list, a note with checklists, and the place
+picker.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/phone-dashboard.png" width="200" alt="Dashboard: note count, recently opened notes, and vault cards"><br><sub>Dashboard</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-folder.png" width="200" alt="A folder in the personal vault, listing subfolders and notes"><br><sub>Folders</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-read.png" width="200" alt="A note in read mode, with rendered checklists and inline code"><br><sub>Read mode</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-edit.png" width="200" alt="A note in edit mode, with the formatting toolbar above the keyboard"><br><sub>Edit mode</sub></td>
-  </tr>
-  <tr>
-    <td align="center"><img src="docs/screenshots/phone-vaults.png" width="200" alt="The vault switcher, with sync status"><br><sub>Vault switcher</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-appearance-dark.png" width="200" alt="Appearance settings in the Storm dark theme"><br><sub>Storm dark</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-appearance-earth.png" width="200" alt="Appearance settings in the SlowFlow earth theme"><br><sub>SlowFlow earth</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-server-settings.png" width="200" alt="Server settings: vault root, MCP access, accounts"><br><sub>Server settings</sub></td>
+    <td align="center"><img src="docs/screenshots/phone-agents.webp" width="200" alt="The Agents list: running and ended sessions with the hosts they run on, and New session"><br><sub>Agents</sub></td>
+    <td align="center"><img src="docs/screenshots/phone-note-read.webp" width="200" alt="A note in Read mode with checklists, some items checked"><br><sub>Read mode</sub></td>
+    <td align="center"><img src="docs/screenshots/phone-note-edit.webp" width="200" alt="The same note in Edit mode, as plain Markdown source"><br><sub>Edit mode</sub></td>
+    <td align="center"><img src="docs/screenshots/phone-place-picker.webp" width="200" alt="The place picker: vaults, and the Agents row showing how many sessions are running"><br><sub>Place picker</sub></td>
   </tr>
 </table>
 
