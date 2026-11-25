@@ -48,7 +48,7 @@ fixture_macos_daemon() {
 }
 
 dry() {
-  run sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces" "$@"
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces" "$@"
 }
 
 # --- plan / dry-run on each fixture -----------------------------------
@@ -153,7 +153,7 @@ dry() {
 
 @test "--resume with no state file yet just notes it and continues" {
   fixture_linux_service
-  run sh "$MIGRATE" --dry-run --resume --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --dry-run --resume --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to resume yet"* ]]
   [[ "$output" == *"Dry run: nothing was changed."* ]]
@@ -163,19 +163,19 @@ dry() {
 
 @test "refuses to run as root" {
   FAKE_USER=root
-  run sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/d"
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/d"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not as root"* ]]
 }
 
 @test "refuses to run as the service account" {
   FAKE_USER=storm-runtime
-  run sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/d"
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/d"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not the service account"* ]]
 
   FAKE_USER=_stormruntime
-  run sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/d"
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --dry-run --dest "$BATS_TEST_TMPDIR/d"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not the service account"* ]]
 }
@@ -185,6 +185,7 @@ dry() {
   # A stat that reports a different device for the old workspace root than
   # for everything else, so SAME_FS comes out false without touching a
   # real second filesystem.
+  rm -f "$FAKE_DIR/bin/stat"
   cat >"$FAKE_DIR/bin/stat" <<EOF
 #!/bin/sh
 if [ "\$1" = -c ] && [ "\$2" = %d ]; then
@@ -197,7 +198,7 @@ fi
 exit 1
 EOF
   chmod 0755 "$FAKE_DIR/bin/stat"
-  run sh "$MIGRATE" --yes --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --yes --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not on the same filesystem"* ]]
   [[ "$output" == *"--allow-copy"* ]]
@@ -207,6 +208,7 @@ EOF
 
 @test "a cross-filesystem move says so in the plan, and --allow-copy is accepted" {
   fixture_linux_service
+  rm -f "$FAKE_DIR/bin/stat"
   cat >"$FAKE_DIR/bin/stat" <<EOF
 #!/bin/sh
 if [ "\$1" = -c ] && [ "\$2" = %d ]; then
@@ -223,4 +225,98 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"DIFFERENT from destination"* ]]
   [[ "$output" == *"rsync-copy (--allow-copy)"* ]]
+}
+
+# --- failures mid-run: reported as a step failure, script stops ---------
+
+@test "a failing install.sh download is reported as a step failure and stops the script" {
+  fixture_linux_service
+  # The fake curl exits 22 for any URL it doesn't recognise, and
+  # migrate-to-user.sh's install URL isn't one of them -- a real download
+  # failure, not a scripted one.
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --yes --enroll storm-enroll:v1:test \
+    --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"✗"* ]]
+  [[ "$output" == *"could not download"* ]]
+  [[ "$output" == *"Migration stopped"* ]]
+  # it never got as far as enrolling
+  [ ! -s "$FAKE_STDIN" ]
+}
+
+@test "a failing enroll is reported as a step failure and stops the script" {
+  fixture_linux_service
+
+  # A successful install.sh download+run: a minimal stand-in for
+  # storm-runtime install --user that places a working NEW_BIN.
+  cat >"$BATS_TEST_TMPDIR/fake-install.sh" <<EOF
+#!/bin/sh
+mkdir -p "\$HOME/.local/bin" "\$HOME/.config/systemd/user"
+cp "$FAKE_SRC" "\$HOME/.local/bin/storm-runtime"
+chmod 0755 "\$HOME/.local/bin/storm-runtime"
+printf 'ExecStart=%s serve\n' "\$HOME/.local/bin/storm-runtime" >"\$HOME/.config/systemd/user/storm-runtime.service"
+echo "Installed the Runtime Host as you (systemd --user)."
+EOF
+
+  rm -f "$FAKE_DIR/bin/curl"
+  cat >"$FAKE_DIR/bin/curl" <<EOF
+#!/bin/sh
+out="" url=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift ;;
+    -*) ;;
+    *) url=\$1 ;;
+  esac
+  shift
+done
+case "\$url" in
+  */install.sh) cat "$BATS_TEST_TMPDIR/fake-install.sh" >"\$out" ;;
+  *) exit 22 ;;
+esac
+EOF
+  chmod 0755 "$FAKE_DIR/bin/curl"
+
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --yes --enroll not-a-valid-enrollment-string \
+    --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"✗"* ]]
+  [[ "$output" == *"enroll failed"* ]]
+  [[ "$output" == *"not an enrollment string"* ]]
+  [[ "$output" == *"Migration stopped"* ]]
+}
+
+# --- the old service must really be stopped before anything moves -------
+
+@test "a service that won't stop aborts before any move" {
+  fixture_linux_service
+  export FAKE_SYSTEMCTL_WONT_STOP=1
+  export STORM_MIGRATE_STOP_WAIT_TRIES=3
+  run env -u STORM_MIGRATE_TEST sh "$MIGRATE" --yes --dest "$BATS_TEST_TMPDIR/newhome/storm/workspaces"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"would not stop"* ]]
+  [[ "$output" == *"nothing was moved"* ]]
+  # the old workspaces are untouched and nothing landed at the destination
+  [ -d "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch" ]
+  [ ! -e "$BATS_TEST_TMPDIR/newhome/storm/workspaces" ]
+  ! grep -qE ' (mv|chown -R|rm -rf) ' "$FAKE_LOG"
+}
+
+# --- --dry-run never prompts for or uses sudo ----------------------------
+
+@test "--dry-run never calls sudo" {
+  fixture_linux_service
+  # A sudo that logs and fails the test if --dry-run ever reaches it,
+  # whether or not the caller would have tolerated the failure.
+  rm -f "$FAKE_DIR/bin/sudo"
+  cat >"$FAKE_DIR/bin/sudo" <<EOF
+#!/bin/sh
+echo "step=\${STORM_STEP:-} sudo \$*" >>"$FAKE_LOG"
+exit 1
+EOF
+  chmod 0755 "$FAKE_DIR/bin/sudo"
+  dry
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Dry run: nothing was changed."* ]]
+  ! grep -q ' sudo ' "$FAKE_LOG"
 }

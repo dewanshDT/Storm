@@ -101,7 +101,11 @@ setup_migrate_world() {
   export NO_COLOR=1 LANG=C.UTF-8 TERM=dumb
   export FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64
   export FAKE_USER=tester FAKE_REAL_USER FAKE_REAL_ID FAKE_REAL_STAT
-  unset FAKE_SUDO_DENIED
+  unset FAKE_SUDO_DENIED FAKE_SYSTEMCTL_WONT_STOP
+  # Real runs keep sudo warm every 60s and poll for 30s at 1s intervals;
+  # tests don't wait on either.
+  export STORM_MIGRATE_SUDO_KEEPALIVE_INTERVAL=0
+  export STORM_MIGRATE_STOP_WAIT_SLEEP=0
   # shellcheck disable=SC1090
   source "$MIGRATE"
 }

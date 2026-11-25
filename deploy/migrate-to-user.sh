@@ -198,10 +198,11 @@ confirm() {
 # ------------------------------------------------------------- sudo ---
 
 SUDO_KEEPALIVE_PID=""
+SUDO_KEEPALIVE_INTERVAL=${STORM_MIGRATE_SUDO_KEEPALIVE_INTERVAL:-60}
 
 sudo_up() {
   sudo -v || die "sudo access is needed to stop the old service and move its files"
-  ( while true; do sudo -n true 2>/dev/null; sleep 60; done ) &
+  ( while true; do sudo -n true 2>/dev/null; sleep "$SUDO_KEEPALIVE_INTERVAL"; done ) &
   SUDO_KEEPALIVE_PID=$!
 }
 
@@ -219,7 +220,7 @@ case "$(uname -s)" in
   *) die "unsupported OS: $(uname -s) (this script covers Linux and macOS)" ;;
 esac
 
-OLD_KIND=none          # service | apt | tarball | none
+OLD_KIND=none          # service | apt | none
 OLD_BIN=""
 OLD_VERSION=""
 OLD_STATE_DIR=""
@@ -239,20 +240,25 @@ parse_workspace_roots() {
     | grep -o '"[^"]*"' | sed 's/^"//; s/"$//'
 }
 
+# Any systemd unit for the service, wherever it was written: an admin's own
+# unit (as a hand-rolled, non-apt install like omarchy's uses, in /etc), or
+# a package's (in /lib or /usr/lib).
+service_unit_exists() {
+  [ -f "$ROOT/etc/systemd/system/storm-runtime.service" ] ||
+    [ -f "$ROOT/lib/systemd/system/storm-runtime.service" ] ||
+    [ -f "$ROOT/usr/lib/systemd/system/storm-runtime.service" ]
+}
+
 detect_linux_old() {
   OLD_SERVICE_ACCOUNT=storm-runtime
   OLD_STATE_DIR="$ROOT/var/lib/storm-runtime"
   OLD_CONFIG="$ROOT/etc/storm-runtime/runtime.toml"
   OLD_HOME="$ROOT/var/lib/storm-runtime/home"
 
-  if command -v systemctl >/dev/null 2>&1 \
-     && systemctl list-unit-files storm-runtime.service 2>/dev/null | grep -q storm-runtime.service; then
-    if dpkg -s storm-runtime >/dev/null 2>&1; then
+  if service_unit_exists; then
+    if [ -x "$ROOT/usr/bin/storm-runtime" ]; then
       OLD_KIND=apt
       OLD_BIN="$ROOT/usr/bin/storm-runtime"
-    elif [ -x "$ROOT/usr/local/bin/storm-runtime" ]; then
-      OLD_KIND=tarball
-      OLD_BIN="$ROOT/usr/local/bin/storm-runtime"
     else
       OLD_KIND=service
       OLD_BIN=$(command -v storm-runtime 2>/dev/null || echo "$ROOT/usr/local/bin/storm-runtime")
@@ -307,6 +313,25 @@ WS_NAMES=""      # newline-separated workspace directory names found
 WS_SIZES=""      # matching newline-separated human sizes
 WS_ROOT_FOR=""   # matching newline-separated source root for each name
 
+# Sized with sudo normally; --dry-run must never prompt for sudo or change
+# anything, so it tries a plain du and says so when it can't read enough to
+# measure, rather than guessing a size or falling back to sudo.
+measure_dir_size() {
+  dir=$1 label=$2
+  if [ "$OPT_DRY_RUN" = 1 ]; then
+    size=""
+    if [ -r "$dir" ] && [ -x "$dir" ]; then
+      size=$(du -sh "$dir" 2>/dev/null | awk '{print $1}')
+    fi
+    [ -n "$size" ] || size="(needs sudo to measure)"
+    printf '%s' "$size"
+    return 0
+  fi
+  size=$(spin_run "du -sh $label" sudo du -sh "$dir" 2>/dev/null | awk '{print $1}')
+  [ -n "$size" ] || size="?"
+  printf '%s' "$size"
+}
+
 collect_workspaces() {
   WS_NAMES=""; WS_SIZES=""; WS_ROOT_FOR=""
   old_ifs=$IFS
@@ -318,8 +343,7 @@ collect_workspaces() {
     for entry in "$root"/*; do
       [ -d "$entry" ] || continue
       name=$(basename "$entry")
-      size=$(spin_run "du -sh $name" sudo du -sh "$entry" 2>/dev/null | awk '{print $1}')
-      [ -n "$size" ] || size="?"
+      size=$(measure_dir_size "$entry" "$name")
       WS_NAMES="$WS_NAMES
 $name"
       WS_SIZES="$WS_SIZES
@@ -358,17 +382,33 @@ wants_claude_memory() {
 
 TOOLCHAIN_DIRS=".cargo .rustup .pub-cache .local/share/flutter .local/node"
 FOUND_TOOLCHAINS=""
+OLD_HOME_UNREADABLE=0  # --dry-run couldn't look under $OLD_HOME without sudo
+
+old_home_readable() {
+  [ -r "$OLD_HOME" ] && [ -x "$OLD_HOME" ]
+}
 
 collect_toolchains() {
   FOUND_TOOLCHAINS=""
   [ "$OS" = linux ] || return 0
   [ -d "$OLD_HOME" ] || return 0
-  for d in $TOOLCHAIN_DIRS; do
-    if sudo test -e "$OLD_HOME/$d" 2>/dev/null; then
-      FOUND_TOOLCHAINS="$FOUND_TOOLCHAINS
-$d"
+  if [ "$OPT_DRY_RUN" = 1 ]; then
+    if ! old_home_readable; then
+      OLD_HOME_UNREADABLE=1
+      return 0
     fi
-  done
+    for d in $TOOLCHAIN_DIRS; do
+      [ -e "$OLD_HOME/$d" ] && FOUND_TOOLCHAINS="$FOUND_TOOLCHAINS
+$d"
+    done
+  else
+    for d in $TOOLCHAIN_DIRS; do
+      if sudo test -e "$OLD_HOME/$d" 2>/dev/null; then
+        FOUND_TOOLCHAINS="$FOUND_TOOLCHAINS
+$d"
+      fi
+    done
+  fi
   FOUND_TOOLCHAINS=$(printf '%s' "$FOUND_TOOLCHAINS" | sed '/^$/d')
 }
 
@@ -381,13 +421,20 @@ FOUND_MEMORY=""  # newline-separated workspace names with memory to copy
 collect_claude_memory() {
   FOUND_MEMORY=""
   [ "$OS" = linux ] || return 0
+  if [ "$OPT_DRY_RUN" = 1 ] && [ -d "$OLD_HOME" ] && ! old_home_readable; then
+    OLD_HOME_UNREADABLE=1
+    return 0
+  fi
   old_ifs=$IFS; IFS='
 '
   for name in $WS_NAMES; do
     IFS=$old_ifs
     root=$(printf '%s\n' "$WS_ROOT_FOR" | sed -n "$(printf '%s\n' "$WS_NAMES" | grep -n "^$name\$" | head -1 | cut -d: -f1)p")
     key=$(memory_key "$root/$name")
-    if sudo test -d "$OLD_HOME/.claude/projects/$key/memory" 2>/dev/null; then
+    if [ "$OPT_DRY_RUN" = 1 ]; then
+      [ -d "$OLD_HOME/.claude/projects/$key/memory" ] && FOUND_MEMORY="$FOUND_MEMORY
+$name"
+    elif sudo test -d "$OLD_HOME/.claude/projects/$key/memory" 2>/dev/null; then
       FOUND_MEMORY="$FOUND_MEMORY
 $name"
     fi
@@ -467,11 +514,15 @@ print_plan() {
     if [ -n "$FOUND_TOOLCHAINS" ]; then
       say "  Toolchains found under the old home:"
       printf '%s\n' "$FOUND_TOOLCHAINS" | sed 's/^/    - /'
+    elif [ "$OLD_HOME_UNREADABLE" = 1 ]; then
+      say "  Toolchains found: (needs sudo to detect)"
     else
       say "  Toolchains found: none"
     fi
     if [ -n "$FOUND_MEMORY" ]; then
       say "  Claude memory found for: $(printf '%s' "$FOUND_MEMORY" | tr '\n' ' ')"
+    elif [ "$OLD_HOME_UNREADABLE" = 1 ]; then
+      say "  Claude memory found: (needs sudo to detect)"
     else
       say "  Claude memory found: none"
     fi
@@ -546,6 +597,41 @@ step_fail() {
 
 # --------------------------------------------------------------- steps ---
 
+STOP_WAIT_TRIES=${STORM_MIGRATE_STOP_WAIT_TRIES:-30}
+STOP_WAIT_SLEEP=${STORM_MIGRATE_STOP_WAIT_SLEEP:-1}
+
+# Polls (up to STOP_WAIT_TRIES x STOP_WAIT_SLEEP, default 30s) until the old
+# Linux service is no longer active or deactivating. Nothing is moved while
+# it might still be using its files.
+wait_old_stopped_linux() {
+  i=0
+  while [ "$i" -lt "$STOP_WAIT_TRIES" ]; do
+    state=$(systemctl is-active storm-runtime 2>/dev/null) || state=""
+    case "$state" in
+      active | deactivating) ;;
+      *) return 0 ;;
+    esac
+    i=$((i + 1))
+    [ "$IS_TTY" = 1 ] && printf '\r  waiting for the old service to stop (%s)...' "$state" >&2
+    sleep "$STOP_WAIT_SLEEP"
+  done
+  [ "$IS_TTY" = 1 ] && printf '\r%*s\r' 60 "" >&2
+  return 1
+}
+
+# Polls until launchctl says the old LaunchDaemon is no longer loaded.
+wait_old_stopped_macos() {
+  i=0
+  while [ "$i" -lt "$STOP_WAIT_TRIES" ]; do
+    sudo launchctl print system/dev.storm.runtime >/dev/null 2>&1 || return 0
+    i=$((i + 1))
+    [ "$IS_TTY" = 1 ] && printf '\r  waiting for the old LaunchDaemon to stop...' >&2
+    sleep "$STOP_WAIT_SLEEP"
+  done
+  [ "$IS_TTY" = 1 ] && printf '\r%*s\r' 60 "" >&2
+  return 1
+}
+
 do_stop_old_service() {
   step_begin "Stop and disable the old $OLD_KIND host"
   if [ "$OLD_KIND" = none ]; then
@@ -558,16 +644,27 @@ do_stop_old_service() {
   fi
   if [ "$OS" = linux ]; then
     sudo systemctl disable --now storm-runtime 2>&1 | sed 's/^/    /' || true
+    if ! wait_old_stopped_linux; then
+      step_fail "the old service would not stop within ${STOP_WAIT_TRIES}x${STOP_WAIT_SLEEP}s; nothing was moved"
+      return 1
+    fi
   else
     uninstall_out=$(mktemp)
     # shellcheck disable=SC2024  # uninstall_out is our own file, not root's
     if sudo "$OLD_BIN" uninstall >"$uninstall_out" 2>&1; then
-      sed 's/^/    /' "$uninstall_out"
+      rc=0
     else
-      sed 's/^/    /' "$uninstall_out"
+      rc=$?
+    fi
+    sed 's/^/    /' "$uninstall_out"
+    rm -f "$uninstall_out"
+    if [ "$rc" -ne 0 ]; then
       sudo launchctl bootout system/dev.storm.runtime 2>&1 | sed 's/^/    /' || true
     fi
-    rm -f "$uninstall_out"
+    if ! wait_old_stopped_macos; then
+      step_fail "the old LaunchDaemon would not stop; nothing was moved"
+      return 1
+    fi
   fi
   mark_done "stop_old"
   step_ok "stopped"
@@ -803,7 +900,29 @@ do_install_user_runtime() {
     step_skip "already installed"
     return 0
   fi
-  if ! curl -fsSL "$INSTALL_SH_URL" | sh -s -- --yes --runtime --channel latest --user 2>&1 | sed 's/^/    /'; then
+  # A pipeline's status is its last command's, so piping through sh and sed
+  # would hide curl's and install.sh's real exit codes: download to a file
+  # first, then run it, each with its own captured rc.
+  install_sh=$(mktemp)
+  if curl -fsSL -o "$install_sh" "$INSTALL_SH_URL"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$install_sh"
+    step_fail "could not download $INSTALL_SH_URL"
+    return 1
+  fi
+  install_out=$(mktemp)
+  if sh "$install_sh" --yes --runtime --channel latest --user >"$install_out" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  sed 's/^/    /' "$install_out"
+  rm -f "$install_sh" "$install_out"
+  if [ "$rc" -ne 0 ]; then
     step_fail "install.sh failed"
     return 1
   fi
@@ -871,7 +990,17 @@ do_enroll() {
       enroll_str=$REPLY_TTY
     fi
     [ -n "$enroll_str" ] || die "no enrollment string given"
-    if ! printf '%s\n' "$enroll_str" | "$NEW_BIN" enroll 2>&1 | sed 's/^/    /'; then
+    # Capture enroll's own exit code (see do_install_user_runtime): piping
+    # through sed would otherwise report sed's status, not enroll's.
+    enroll_out=$(mktemp)
+    if printf '%s\n' "$enroll_str" | "$NEW_BIN" enroll >"$enroll_out" 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
+    sed 's/^/    /' "$enroll_out"
+    rm -f "$enroll_out"
+    if [ "$rc" -ne 0 ]; then
       step_fail "enroll failed"
       return 1
     fi
@@ -882,7 +1011,15 @@ do_enroll() {
   else
     launchctl kickstart -k "gui/$(id -u)/dev.storm.runtime" 2>&1 | sed 's/^/    /' || true
   fi
-  if "$NEW_BIN" check 2>&1 | sed 's/^/    /'; then
+  check_out=$(mktemp)
+  if "$NEW_BIN" check >"$check_out" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  sed 's/^/    /' "$check_out"
+  rm -f "$check_out"
+  if [ "$rc" -eq 0 ]; then
     step_ok "host is up"
   else
     step_fail "storm-runtime check failed; see the log"
@@ -953,7 +1090,11 @@ main() {
 
   if [ "$OS" = linux ]; then detect_linux_old; else detect_macos_old; fi
   detect_user_install
-  sudo_up
+  # --dry-run must never prompt for sudo or change anything: sudo_up (and
+  # its background keepalive) runs only for a real migration.
+  if [ "$OPT_DRY_RUN" != 1 ]; then
+    sudo_up
+  fi
   collect_workspaces
   collect_toolchains
   collect_claude_memory
