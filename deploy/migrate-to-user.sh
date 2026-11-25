@@ -368,7 +368,7 @@ collect_workspaces() {
         # Absent (its parent says so) is "none"; hidden behind a 0700 parent
         # or itself unreadable is "couldn't list".
         parent=$(dirname "$root")
-        if [ -e "$root" ] || [ ! -r "$parent" ] || [ ! -x "$parent" ]; then
+        if [ -e "$root" ] || { [ -e "$parent" ] && { [ ! -r "$parent" ] || [ ! -x "$parent" ]; }; }; then
           WS_UNLISTABLE="$WS_UNLISTABLE
 $root"
         fi
