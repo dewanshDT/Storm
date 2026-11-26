@@ -2334,7 +2334,7 @@ runtime_plan() {
     plan_add fg "$WS_SUDO" "Add a first workspace, if the runtime has none (a folder, or a git repository to clone)" \
       "$(ws_display '<name or git URL>')" runtime_workspace
   elif [ "$mode" = install ]; then
-    plan_note "Runtime: no workspace is made. Pass --workspace NAME or a git URL, or make a folder in $RT_WORKSPACES."
+    plan_note "Runtime: no workspace is made. Pass --workspace NAME or a git URL, or make a folder in $(ws_root)."
   fi
   return 0
 }
@@ -2376,10 +2376,40 @@ ws_spec_ok() {
   return 0
 }
 
+# ws_roots: the runtime's workspace roots, one a line: runtime.toml's
+# workspace_roots when it names any (a migrated host's are elsewhere, and a
+# folder made outside them is one the runtime never sees), else
+# $RT_WORKSPACES.
+ws_roots() {
+  local roots=""
+  if [ -r "$RT_CONFIG" ]; then
+    roots=$(awk '
+      /^[[:space:]]*#/ { next }
+      !on && /^[[:space:]]*workspace_roots[[:space:]]*=/ { on = 1; sub(/^[^=]*=/, "") }
+      on { buf = buf $0 " "; if (index($0, "]")) exit }
+      END { printf "%s", buf }' "$RT_CONFIG" |
+      grep -oE "\"[^\"]*\"|'[^']*'" | sed 's/^.//; s/.$//')
+  fi
+  if [ -n "$roots" ]; then
+    printf '%s\n' "$roots"
+  else
+    printf '%s\n' "$RT_WORKSPACES"
+  fi
+}
+
+# ws_root: where a new workspace goes, the first root.
+ws_root() {
+  ws_roots | head -1
+}
+
+ws_roots_text() {
+  ws_roots | sed '$!s/$/,/' | tr '\n' ' ' | sed 's/ $//'
+}
+
 ws_display() {
   local how="mkdir" dest
   ws_is_url "$1" && how="git clone $1"
-  dest=$(shq "$RT_WORKSPACES/$(ws_name "$1")")
+  dest=$(shq "$(ws_root)/$(ws_name "$1")")
   if [ "$OS" = macos ] || [ "$RT_USER" = 1 ]; then
     printf '%s %s' "$how" "$dest"
   else
@@ -2398,13 +2428,15 @@ ws_as() {
 }
 
 ws_existing() {
-  ws_as find "$RT_WORKSPACES" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null |
-    sed 's#.*/##' | sort | tr '\n' ' '
+  local r
+  ws_roots | while IFS= read -r r; do
+    ws_as find "$r" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null
+  done | sed 's#.*/##' | sort -u | tr '\n' ' '
 }
 
 ws_make() {
   local dest
-  dest="$RT_WORKSPACES/$(ws_name "$1")"
+  dest="$(ws_root)/$(ws_name "$1")"
   if ws_is_url "$1"; then
     ws_as git clone -- "$1" "$dest"
   else
@@ -2413,7 +2445,8 @@ ws_make() {
 }
 
 runtime_workspace() {
-  local spec=${1:-} have rc
+  local spec=${1:-} have rc root
+  root=$(ws_root)
   have=$(ws_existing)
   if [ -n "$have" ]; then
     echo "the runtime already has workspaces (${have% }); none added"
@@ -2424,25 +2457,25 @@ runtime_workspace() {
     ws_make "$spec"
     return
   fi
-  ui_info "Sessions run in a workspace: a folder in $RT_WORKSPACES. There's none yet."
+  ui_info "Sessions run in a workspace: a folder in $root. There's none yet."
   ui_info "Name a folder to make, or give a git URL to clone into it."
   while :; do
     ui_input "Workspace (Enter alone skips)" ""
     spec=$UI_RESULT
     if [ -z "$spec" ]; then
-      ui_note "No workspace yet: make a folder in $RT_WORKSPACES before your first session."
+      ui_note "No workspace yet: make a folder in $root before your first session."
       return "$STEP_SKIPPED"
     fi
     ws_spec_ok "$spec" && break
     ui_warn "That isn't a folder name (letters, digits, . _ -) or a git URL"
   done
   if ws_is_url "$spec"; then
-    ui_spinner "Clone $spec into $RT_WORKSPACES/$(ws_name "$spec")" ws_make "$spec"
+    ui_spinner "Clone $spec into $root/$(ws_name "$spec")" ws_make "$spec"
     rc=$?
   else
     logged ws_make "$spec"
     rc=$?
-    [ "$rc" = 0 ] && ui_ok "Made $RT_WORKSPACES/$(ws_name "$spec")"
+    [ "$rc" = 0 ] && ui_ok "Made $root/$(ws_name "$spec")"
   fi
   return "$rc"
 }
@@ -3958,7 +3991,7 @@ flow_uninstall() {
   [ "$OPT_DRY_RUN" = 1 ] && return "$rc"
   ui_head "  What remains"
   in_sel server && ui_info "Your data: $DATA_ROOT (vaults, state, backups)"
-  in_sel runtime && [ -n "$RT_WORKSPACES" ] && ui_info "The runtime's workspaces: $RT_WORKSPACES"
+  in_sel runtime && [ -n "$RT_WORKSPACES" ] && ui_info "The runtime's workspaces: $(ws_roots_text)"
   in_sel runtime && [ -z "$RT_PURGE" ] && ui_info "The runtime's state and config: $RT_STATE, $RT_CONFIG"
   [ "$OS" = linux ] && [ -e "$LIST_PATH" ] && ui_info "Storm's apt source: $LIST_PATH (remove it to stop updates)"
   ui_info "This installer's log: $LOG_FILE"
@@ -3983,18 +4016,18 @@ summary_screen() {
   if [ "$RT_INSTALLED" = 1 ]; then
     if [ "$RT_USER" = 1 ]; then
       if [ "$OS" = macos ]; then
-        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: $RT_WORKSPACES"
+        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: $(ws_roots_text)"
       else
-        ui_info "The Runtime Host runs as $ME (systemd --user storm-runtime); workspaces: $RT_WORKSPACES"
+        ui_info "The Runtime Host runs as $ME (systemd --user storm-runtime); workspaces: $(ws_roots_text)"
         if [ "$(loginctl show-user "$ME" --property=Linger --value 2>/dev/null)" != yes ]; then
           ui_info "It runs while you're logged in. To start it at boot without a login, an"
           ui_info "administrator runs once: sudo loginctl enable-linger $ME"
         fi
       fi
     elif [ "$OS" = macos ]; then
-      ui_info "The Runtime Host runs as $RT_ACCOUNT (LaunchDaemon dev.storm.runtime); workspaces: $RT_WORKSPACES"
+      ui_info "The Runtime Host runs as $RT_ACCOUNT (LaunchDaemon dev.storm.runtime); workspaces: $(ws_roots_text)"
     else
-      ui_info "The Runtime Host runs as $RT_ACCOUNT (systemd storm-runtime); workspaces: $RT_WORKSPACES"
+      ui_info "The Runtime Host runs as $RT_ACCOUNT (systemd storm-runtime); workspaces: $(ws_roots_text)"
     fi
   fi
   if in_sel mcp && { [ "$MCP_INSTALLED" = 1 ] || { [ "$RT_USER" = 1 ] && mcp_via_runtime; }; }; then

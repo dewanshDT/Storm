@@ -169,3 +169,50 @@ user_paths_ok() {
   [[ "$output" == *"The runtime's state and config: $HOME/.local/state/storm-runtime, $HOME/.config/storm-runtime/runtime.toml"* ]]
   [[ "$output" != *"apt source"* ]]
 }
+
+# A migrated host's workspaces live in the roots its runtime.toml names, not
+# in the state folder, and the first-workspace step must see them there.
+ws_world() {
+  os_release arch
+  platform
+  rt_user_paths
+  mkdir -p "$(dirname "$RT_CONFIG")"
+}
+
+@test "workspaces: runtime.toml's roots are where they are looked for" {
+  ws_world
+  mkdir -p "$HOME/storm/workspaces/hark" "$HOME/My Code/app" "$HOME/storm/workspaces/.hidden"
+  printf '%s\n' '# workspace_roots = ["/nowhere"]' \
+    "workspace_roots = [\"$HOME/storm/workspaces\", '$HOME/My Code']" >"$RT_CONFIG"
+  [ "$(ws_roots | wc -l)" -eq 2 ]
+  [ "$(ws_root)" = "$HOME/storm/workspaces" ]
+  [ "$(ws_existing)" = "app hark " ]
+  run runtime_workspace
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already has workspaces: app hark"* ]]
+}
+
+@test "workspaces: roots written across lines are all read" {
+  ws_world
+  mkdir -p "$HOME/b/two"
+  printf '%s\n' 'workspace_roots = [' "  \"$HOME/a\"," "  \"$HOME/b\"," ']' 'max_sessions = 4' >"$RT_CONFIG"
+  [ "$(ws_roots | tail -1)" = "$HOME/b" ]
+  [ "$(ws_existing)" = "two " ]
+}
+
+@test "workspaces: no runtime.toml, or no roots in it, means the state folder" {
+  ws_world
+  [ "$(ws_roots)" = "$RT_WORKSPACES" ]
+  printf 'max_sessions = 4\nworkspace_roots = []\n' >"$RT_CONFIG"
+  [ "$(ws_roots)" = "$RT_WORKSPACES" ]
+}
+
+@test "workspaces: a new one is made in the first configured root" {
+  ws_world
+  mkdir -p "$HOME/storm/workspaces"
+  printf 'workspace_roots = ["%s"]\n' "$HOME/storm/workspaces" >"$RT_CONFIG"
+  ws_make scratch
+  [ -d "$HOME/storm/workspaces/scratch" ]
+  [ ! -e "$RT_WORKSPACES/scratch" ]
+  [[ "$(ws_display scratch)" == *"mkdir $HOME/storm/workspaces/scratch" ]]
+}
