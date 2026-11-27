@@ -121,6 +121,5 @@ String screenLabelOf(Uri uri) {
   if (uri.path == Routes.pairing) return 'pairing';
   if (uri.path == Routes.login) return 'login';
   if (uri.path == Routes.addDevice) return 'add-device';
-  if (uri.path == Routes.gallery) return 'gallery';
   return 'other';
 }

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:storm/ui/gallery_screen.dart';
 import 'package:storm/ui/icons.dart';
 import 'package:storm/ui/widgets.dart';
 import 'package:storm/ui/theme.dart';
@@ -81,25 +80,6 @@ void main() {
       );
       expect(d.borderRadius, isNotNull);
     });
-  });
-
-  testWidgets('the gallery renders every preset without overflowing', (
-    tester,
-  ) async {
-    // The claim in widgets.dart's header, kept honest. Rendering it is also
-    // the cheapest smoke test there is for the whole shared set.
-    tester.view.physicalSize = const Size(2400, 2400);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-
-    await tester.pumpWidget(
-      MaterialApp(theme: StormTheme.dark(), home: const GalleryScreen()),
-    );
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    for (final preset in StormPreset.values) {
-      expect(find.text(preset.label), findsOneWidget);
-    }
   });
 
   Widget wrap(Widget child, {StormPreset preset = StormPreset.stormDark}) =>

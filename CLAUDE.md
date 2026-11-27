@@ -1163,5 +1163,6 @@ and a future reader needs to know that before "simplifying" it.
 (`controls.dart`, `widgets.dart`, `surfaces.dart`). A pattern that doesn't
 exist is added there as a token-driven component (`context.tokens`, no
 hard-coded colours) with every state — idle, hover, keyboard focus,
-pressed, selected, disabled — and an entry in `lib/ui/gallery_screen.dart`,
-then used. No one-off `Container`/`InkWell` controls.
+pressed, selected, disabled — and a Widgetbook use case under
+`apps/widgetbook/lib/use_cases/` (its coverage test fails without one), then
+used. No one-off `Container`/`InkWell` controls.

@@ -163,7 +163,7 @@ class AccentPicker extends StatelessWidget {
   }
 }
 
-/// One swatch. Public because the gallery renders the set on its own.
+/// One swatch. Public because the Widgetbook catalogue renders the set on its own.
 class AccentSwatch extends StatelessWidget {
   const AccentSwatch({
     super.key,

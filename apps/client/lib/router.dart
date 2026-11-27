@@ -10,7 +10,6 @@ import 'state/nav_memory.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/breakpoints.dart';
 import 'ui/browse_screen.dart';
-import 'ui/gallery_screen.dart';
 import 'ui/login_screen.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
@@ -67,10 +66,6 @@ abstract final class Routes {
 
   /// Kept at this path: the OAuth orphan relay in `main.dart` lands here.
   static const integrations = '/settings/integrations';
-
-  /// Every shared widget in all three themes. Not linked from the app — it is
-  /// a surface for judging the token layer, reached by typing the path.
-  static const gallery = '/gallery';
 
   /// Everything note-shaped hangs off the vault, so a deep link carries which
   /// vault it means and back always retraces the real path.
@@ -184,10 +179,6 @@ final routerProvider = Provider<GoRouter>((ref) {
             : Routes.starting;
       }
 
-      // The gallery needs no server, and bouncing it to Connect would make it
-      // unreachable on exactly the install where the theme is being judged.
-      if (state.matchedLocation == Routes.gallery) return null;
-
       // Set up — by pairing *or* by the legacy URL+token — so every auth
       // screen is behind us. Pairing is deliberately not required here: an
       // install that predates auth has a token and no device, and sending it
@@ -234,10 +225,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.addDevice,
         builder: (_, _) => const WindowFrame(child: AddDeviceScreen()),
-      ),
-      GoRoute(
-        path: Routes.gallery,
-        builder: (_, _) => const WindowFrame(child: GalleryScreen()),
       ),
       ShellRoute(
         builder: (_, state, child) =>

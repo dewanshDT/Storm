@@ -78,7 +78,6 @@ Every route is also the web client's URL.
                            claude-login · hosts · storage · connection ·
                            advanced · health
 /add-device                a pairing QR for another device
-/gallery                   the token gallery, by typed URL only
 ```
 
 Retired routes redirect: `/settings/server`, `/settings/client`,
@@ -346,6 +345,9 @@ vault's browse root.
 ---
 
 ## 10. Colour and type
+
+Every shared component, in every theme, is in the Widgetbook catalogue
+(`make widgetbook`, `apps/widgetbook`).
 
 ### Accents
 

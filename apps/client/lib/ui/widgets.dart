@@ -2,7 +2,7 @@
 ///
 /// Each one reads its size, colour and radius from [StormTokens] and decides
 /// nothing for itself — a change to a token input moves every screen together.
-/// The `/gallery` route renders the whole set in all three themes at once.
+/// The Widgetbook catalogue (`apps/widgetbook`) renders the whole set.
 library;
 
 import 'package:flutter/material.dart';
