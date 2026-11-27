@@ -1160,7 +1160,8 @@ looks odd — most non-obvious code here is guarding one of the invariants above
 and a future reader needs to know that before "simplifying" it.
 
 **Client UI: controls come from the shared components in `lib/ui/`**
-(`controls.dart`, `widgets.dart`, `surfaces.dart`). A pattern that doesn't
+(`controls.dart` and `widgets.dart` are barrels over per-concern files such
+as `buttons.dart`, `tags.dart` and `rows.dart`; also `surfaces.dart`). A pattern that doesn't
 exist is added there as a token-driven component (`context.tokens`, no
 hard-coded colours) with every state — idle, hover, keyboard focus,
 pressed, selected, disabled — and a Widgetbook use case under

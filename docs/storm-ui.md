@@ -349,6 +349,13 @@ vault's browse root.
 Every shared component, in every theme, is in the Widgetbook catalogue
 (`make widgetbook`, `apps/widgetbook`).
 
+The components live in `lib/ui/`, grouped by concern. `widgets.dart` and
+`controls.dart` are barrels, so screens keep importing them; the code is in
+`tags.dart`, `status.dart`, `rows.dart`, `inputs.dart`, `notifications.dart`,
+`popover.dart`, `media.dart` (from `widgets.dart`) and `buttons.dart`,
+`choices.dart`, `settings_row.dart` (from `controls.dart`). A new component goes
+in the file for its concern, not into a barrel.
+
 ### Accents
 
 Notes and vaults can carry one of ten accents. **The name is what gets written

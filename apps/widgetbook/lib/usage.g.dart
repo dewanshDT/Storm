@@ -37,6 +37,7 @@ const componentUsage = <String, List<UsageSite>>{
   'CodeBlock': [UsageSite('ui/report_sheet.dart', 199)],
   'ConflictCard': [UsageSite('ui/note_editor.dart', 350)],
   'CountBadge': [
+    UsageSite('ui/notifications.dart', 55),
     UsageSite('ui/shell/activity_rail.dart', 278),
     UsageSite('ui/shell/corner_bubbles.dart', 330),
   ],
@@ -440,6 +441,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/lan_servers.dart', 633),
     UsageSite('ui/lan_servers.dart', 705),
     UsageSite('ui/lan_servers.dart', 776),
+    UsageSite('ui/media.dart', 187),
     UsageSite('ui/note_header.dart', 27),
     UsageSite('ui/pairing_screen.dart', 485),
     UsageSite('ui/pairing_screen.dart', 493),
@@ -463,7 +465,6 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/trash_screen.dart', 248),
     UsageSite('ui/trash_screen.dart', 521),
     UsageSite('ui/trash_screen.dart', 723),
-    UsageSite('ui/widgets.dart', 1150),
   ],
   'StormCheckbox': [
     UsageSite('ui/markdown/storm_markdown_view.dart', 103),
@@ -475,8 +476,8 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/report_sheet.dart', 362),
   ],
   'StormIcon': [
+    UsageSite('ui/rows.dart', 148),
     UsageSite('ui/shell/vault_sidebar.dart', 214),
-    UsageSite('ui/widgets.dart', 1393),
   ],
   'StormInput': [
     UsageSite('ui/lan_servers.dart', 747),
