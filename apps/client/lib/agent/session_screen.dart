@@ -14,6 +14,8 @@ import '../router.dart';
 import '../state/app_state.dart';
 import '../state/terminal_prefs.dart';
 import '../ui/breakpoints.dart';
+import '../ui/buttons.dart';
+import '../ui/cards.dart';
 import '../ui/controls.dart' show StormToggle;
 import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
@@ -312,18 +314,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       default:
     }
     if (ref.watch(spawnOnAskProvider(_id)) && showsSpawnSwitch(s)) {
-      return Container(
+      return Hairline(
         padding: EdgeInsets.fromLTRB(
           t.sp * 2,
           t.sp * 1.5,
           t.sp * 2,
           t.sp * 1.5,
         ),
-        decoration: BoxDecoration(
-          border: Border(
-            bottom: BorderSide(color: t.border, width: t.bw),
-          ),
-        ),
+        bottom: true,
         child: SpawnOnConfirm(
           session: s,
           host: host,
@@ -541,17 +539,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ),
           ),
         if (s.ended)
-          Container(
+          Hairline(
             key: const Key('ended-footer'),
             padding: EdgeInsets.symmetric(
               horizontal: t.sp * 2.5,
               vertical: t.sp * 1.25,
             ),
-            decoration: BoxDecoration(
-              border: Border(
-                top: BorderSide(color: t.border, width: t.bw),
-              ),
-            ),
+            top: true,
             child: Text(
               '${endedLine(s)} · scrollback kept until you dismiss it',
               style: agentMono(t, size: t.labelSize * 1.09),
@@ -600,17 +594,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     required bool inspectorOpen,
   }) {
     final t = context.tokens;
-    return Container(
+    return Hairline(
       key: const Key('session-bar'),
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 2.5,
         vertical: t.sp * 1.75,
       ),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: t.border, width: t.bw),
-        ),
-      ),
+      bottom: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -846,18 +836,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
+          Hairline(
             padding: EdgeInsets.fromLTRB(
               t.sp * 2,
               t.sp * 0.75,
               t.sp * 0.75,
               t.sp * 0.75,
             ),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: t.border, width: t.bw),
-              ),
-            ),
+            bottom: true,
             child: Row(
               children: [
                 Expanded(
@@ -957,18 +943,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                       ),
               ),
             if (s.ended)
-              Container(
+              Hairline(
                 padding: EdgeInsets.fromLTRB(
                   t.sp * 2,
                   t.sp * 1.5,
                   t.sp * 2,
                   t.sp * 1.5,
                 ),
-                decoration: BoxDecoration(
-                  border: Border(
-                    top: BorderSide(color: t.border, width: t.bw),
-                  ),
-                ),
+                top: true,
                 child: SafeArea(
                   top: false,
                   minimum: EdgeInsets.only(bottom: t.sp * 2),
@@ -2217,13 +2199,9 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
                   onTap: w.note == null
                       ? null
                       : () => widget.onOpenNote(w.note!),
-                  child: Container(
+                  child: Hairline(
                     padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
-                    decoration: BoxDecoration(
-                      border: Border(
-                        bottom: BorderSide(color: t.border, width: t.bw),
-                      ),
-                    ),
+                    bottom: true,
                     child: Row(
                       children: [
                         Expanded(
