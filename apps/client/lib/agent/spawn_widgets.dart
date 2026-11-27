@@ -504,7 +504,6 @@ class _Banner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final fill = accent ? t.accent : t.danger;
     return NoticeBanner(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -527,35 +526,13 @@ class _Banner extends StatelessWidget {
                 onPressed: onCancel,
               ),
               if (onAction != null || action.isNotEmpty)
-                Semantics(
-                  button: true,
-                  enabled: onAction != null,
+                StormButton(
+                  key: const Key('banner-action'),
                   label: action,
-                  excludeSemantics: true,
-                  onTap: onAction,
-                  child: Material(
-                    color: onAction == null ? t.surface : fill,
-                    borderRadius: BorderRadius.circular(t.rControl),
-                    child: InkWell(
-                      key: const Key('banner-action'),
-                      borderRadius: BorderRadius.circular(t.rControl),
-                      onTap: onAction,
-                      child: Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: t.sp * 1.25,
-                          vertical: t.sp * 0.75,
-                        ),
-                        child: Text(
-                          action,
-                          style: agentSans(
-                            t,
-                            color: onAction == null ? t.text3 : t.onAccent,
-                            weight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                  onPressed: onAction,
+                  kind: accent
+                      ? StormButtonKind.primary
+                      : StormButtonKind.danger,
                 ),
             ],
           ),
