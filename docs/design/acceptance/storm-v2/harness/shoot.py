@@ -47,6 +47,8 @@ import storm_auth  # noqa: E402
 PORT = int(os.environ.get("HARNESS_PORT", "7481"))
 DEBUG_PORT = int(os.environ.get("HARNESS_DEBUG_PORT", "9333"))
 BASE = f"http://127.0.0.1:{PORT}"
+WB_PORT = int(os.environ.get("HARNESS_WIDGETBOOK_PORT", "7482"))
+WB_BASE = f"http://127.0.0.1:{WB_PORT}"
 USERNAME = "storm"
 PASSWORD = storm_auth.PASSWORD
 
@@ -55,7 +57,6 @@ VIEWPORTS = {
     "phone": dict(width=390, height=844, deviceScaleFactor=2, mobile=True),
     # The crews handoff's 900 frame (4h): the breakpoint itself.
     "desktop900": dict(width=900, height=800, deviceScaleFactor=2, mobile=False),
-    "gallery": dict(width=1180, height=4600, deviceScaleFactor=1, mobile=False),
 }
 
 # Injected once per page: find Flutter semantics nodes by their accessible
@@ -186,6 +187,18 @@ class Harness:
         wait_for(lambda: urllib.request.urlopen(f"{BASE}/v1/health", timeout=1).status == 200,
                  30, "the server")
         log(f"server up at {BASE} (state in {self.tmp})")
+
+    def start_widgetbook(self):
+        web = os.path.join(ROOT, "apps/widgetbook/build/web")
+        if not os.path.exists(os.path.join(web, "index.html")):
+            raise SystemExit(f"missing {web} — run make widgetbook-web")
+        self.procs.append(subprocess.Popen(
+            [sys.executable, "-m", "http.server", str(WB_PORT), "--bind", "127.0.0.1",
+             "--directory", web],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        wait_for(lambda: urllib.request.urlopen(f"{WB_BASE}/", timeout=1).status == 200,
+                 10, "the catalogue server")
+        log(f"catalogue up at {WB_BASE}")
 
     def claim(self):
         session, _device, _uid = storm_auth.sign_in(BASE, log_path=self.server_log)
@@ -405,6 +418,21 @@ class Harness:
 
     # ---- shots --------------------------------------------------------
 
+    def shoot_catalogue(self, shot):
+        self.viewport(shot["viewport"])
+        self.page.call("Page.navigate", url=f"{WB_BASE}/{shot['widgetbook']}")
+        self.wait_app()
+        self.settle(shot.get("settle", 1.5))
+        self.capture(shot)
+
+    def capture(self, shot):
+        png = self.page.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
+        path = os.path.join(self.out, shot["name"] + ".png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(png["data"]))
+        log(f"{shot['name']}: {self.location()} → {os.path.relpath(path, ROOT)}")
+
     def shoot(self, shot):
         switched = getattr(self, "current_viewport", None) != shot["viewport"]
         self.viewport(shot["viewport"])
@@ -458,12 +486,7 @@ class Harness:
             # Park the pointer in a corner so no row is captured mid-hover.
             self.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=1, y=1)
         self.settle(shot.get("settle", 1.5))
-        png = self.page.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
-        path = os.path.join(self.out, shot["name"] + ".png")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as fh:
-            fh.write(base64.b64decode(png["data"]))
-        log(f"{shot['name']}: {self.location()} → {os.path.relpath(path, ROOT)}")
+        self.capture(shot)
 
     def debug_dump(self):
         """On failure: what the page looked like, and what it offered."""
@@ -514,16 +537,26 @@ def main():
 
     h = Harness(os.path.abspath(args.out), args.keep)
     try:
-        h.start_server()
-        h.claim()
+        chosen = shots.SETS[args.set]
+        needs_app = any("widgetbook" not in s for s in chosen)
+        if needs_app:
+            h.start_server()
+            h.claim()
+        if any("widgetbook" in s for s in chosen):
+            h.start_widgetbook()
         h.start_browser()
-        h.sign_in()
-        if args.preset:
-            h.use_preset(args.preset)
-        for shot in shots.SETS[args.set]:
+        if needs_app:
+            h.sign_in()
+            if args.preset:
+                h.use_preset(args.preset)
+        for shot in chosen:
             if "step" in shot:
                 h.step(shot["step"])
-            elif shot["name"].startswith(only):
+            elif not shot["name"].startswith(only):
+                continue
+            elif "widgetbook" in shot:
+                h.shoot_catalogue(shot)
+            else:
                 h.shoot(shot)
         if h.crew_checks is not None:
             failed = h.crew_checks.failed()

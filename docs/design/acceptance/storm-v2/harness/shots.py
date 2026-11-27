@@ -4,7 +4,8 @@ Routes use `{vault:<name>}` and `{note:<vault>/<path>}` placeholders, resolved
 against the fixture server at run time (ids are UUIDs minted at boot).
 
 - `current`: the app as it is before Storm v2, for the record (`baseline/`).
-- `design`: the `/gallery` route, all three presets side by side.
+- `design`: the Widgetbook catalogue (`make widgetbook-web`), a few use cases
+  under the Storm dark and light themes.
 - `v2`: the approved states, named exactly as the reference screenshots in
   `design_handoff_storm_v2/screenshots/`, filled in slice by slice.
 """
@@ -218,8 +219,20 @@ CREWS = [
                               ("step", "crews:after_end_all")], settle=1.5),
 ]
 
+def catalogue(slug, path):
+    """A use case, alone, under each Storm theme. `widgetbook` is the query
+    string the catalogue's deep link takes; the app and server are not used."""
+    return [
+        dict(name=f"design-system/{slug}-{mode}", viewport="desktop", settle=2.5,
+             widgetbook=f"?path={path}&preview&theme={{name:Storm%20%C2%B7%20{mode}%20(Storm%20{mode})}}")
+        for mode in ("dark", "light")
+    ]
+
+
 DESIGN = [
-    dict(name="design-system/gallery", viewport="gallery", route="/gallery", settle=2.5),
+    *catalogue("button", "Controls/StormButton/default"),
+    *catalogue("choice-cards", "Controls/ChoiceCards/default"),
+    *catalogue("empty-state", "States/EmptyState/default"),
 ]
 
 SETS = {"current": CURRENT, "v2": V2, "design": DESIGN, "crews": CREWS}

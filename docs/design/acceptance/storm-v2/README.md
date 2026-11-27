@@ -68,7 +68,7 @@ the state recipe in `harness/shots.py`.
 |---|---|---|---|
 | `baseline/*` (10 shots) | — (pre-v2 record) | 0 | captured 2026-10-08 on `staging` `c9131b4` |
 | `auth/phone-setup.png`, `auth/phone-signin.png` | — (not redesigned; existing style) | 1b | password only, captured 2026-10-08 |
-| `design-system/gallery.png` | — (`/gallery`, three presets) | 2 | captured 2026-10-08 (`--set design`) |
+| `design-system/{button,choice-cards,empty-state}-{dark,light}.png` | — (Widgetbook catalogue, Storm themes) | 2 | replaces `gallery.png` (the retired `/gallery` route, decision 164); needs `make widgetbook-web`, `--set design` |
 | `desktop-01-notes-provenance.png` | same name | 4 + 8 | re-shot 2026-10-08 (slice 8) after the `board` session's real write: the provenance link is the server's `agent_write` |
 | `desktop-02-note-start-session.png` | same name | 4 | captured 2026-10-08 |
 | `desktop-03-vault-switcher.png` | same name | 4 | captured 2026-10-08 |
