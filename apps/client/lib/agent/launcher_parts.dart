@@ -8,19 +8,14 @@ class _Close extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Semantics(
-      button: true,
-      label: 'Close',
-      excludeSemantics: true,
+    return Tappable(
+      key: const Key('launcher-close'),
+      semanticLabel: 'Close',
       onTap: onTap,
-      child: InkWell(
-        key: const Key('launcher-close'),
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl),
-        child: Padding(
-          padding: EdgeInsets.all(t.sp * 0.5),
-          child: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
-        ),
+      borderRadius: BorderRadius.circular(t.rControl),
+      child: Padding(
+        padding: EdgeInsets.all(t.sp * 0.5),
+        child: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
       ),
     );
   }
@@ -65,16 +60,13 @@ class _ContextChip extends ConsumerWidget {
     final shown =
         title ??
         (note == null ? '' : noteTitleOf(note.meta.title, note.meta.path));
-    return Container(
+    return StormCard(
       key: const Key('launcher-context'),
+      color: t.accentSoft,
+      radius: t.rControl,
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 1.5,
         vertical: t.sp * 1.125,
-      ),
-      decoration: BoxDecoration(
-        color: t.accentSoft,
-        borderRadius: BorderRadius.circular(t.rControl),
-        border: Border.all(color: t.border, width: t.bw),
       ),
       child: Row(
         children: [
@@ -123,16 +115,11 @@ class _ContextChip extends ConsumerWidget {
           ] else
             const Spacer(),
           SizedBox(width: t.sp),
-          Semantics(
-            button: true,
-            label: 'Remove context',
-            excludeSemantics: true,
+          Tappable(
+            key: const Key('launcher-context-clear'),
+            semanticLabel: 'Remove context',
             onTap: onClear,
-            child: InkWell(
-              key: const Key('launcher-context-clear'),
-              onTap: onClear,
-              child: Icon(LucideIcons.x, size: t.codeSize, color: t.text3),
-            ),
+            child: Icon(LucideIcons.x, size: t.codeSize, color: t.text3),
           ),
         ],
       ),
@@ -335,41 +322,6 @@ class _Under extends StatelessWidget {
   }
 }
 
-/// An `accent` text action: More, Fewer options, New workspace…. As wide
-/// as its words, so a row's empty end is not a target.
-class _Link extends StatelessWidget {
-  const _Link({super.key, required this.text, required this.onTap});
-
-  final String text;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Semantics(
-      button: true,
-      label: text,
-      excludeSemantics: true,
-      onTap: onTap,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl),
-        child: Padding(
-          padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
-          child: Text(
-            text,
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: t.codeSize,
-              color: t.accent,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 enum LauncherChipState { on, off, unavailable }
 
 /// One of "This session can"'s chips (153-5): an `accent` outline when on,
@@ -411,7 +363,7 @@ class LauncherChip extends StatelessWidget {
           borderRadius: BorderRadius.circular(t.rControl),
           side: BorderSide(color: on ? t.accent : t.border, width: t.bw),
         ),
-        child: InkWell(
+        child: Tappable(
           onTap: onTap,
           borderRadius: BorderRadius.circular(t.rControl),
           child: Padding(
@@ -481,8 +433,9 @@ class _ModelUnder extends StatelessWidget {
       children: [
         Text('Or pick one:', style: style),
         for (final m in suggestions)
-          InkWell(
+          Tappable(
             key: Key('launcher-model-$m'),
+            semanticLabel: m,
             onTap: () => onPick(m),
             borderRadius: BorderRadius.circular(t.rControl),
             child: Text(m, style: style.copyWith(color: t.accent)),
@@ -641,14 +594,11 @@ class _NewWorkspaceFormState extends ConsumerState<_NewWorkspaceForm> {
       fontSize: t.codeSize,
       color: t.text2,
     );
-    return Container(
+    return StormCard(
       key: const Key('launcher-new-workspace-form'),
+      color: t.surface2,
+      radius: t.rControl,
       padding: EdgeInsets.all(t.sp * 1.25),
-      decoration: BoxDecoration(
-        color: t.surface2,
-        borderRadius: BorderRadius.circular(t.rControl),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,

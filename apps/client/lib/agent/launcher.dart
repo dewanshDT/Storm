@@ -10,9 +10,12 @@ import '../editor/token_estimate.dart';
 import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
 import '../state/terminal_prefs.dart' show launchBrightness;
+import '../ui/cards.dart' show StormCard;
 import '../ui/controls.dart';
+import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/states.dart';
 import '../ui/surfaces.dart';
+import '../ui/tappable.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem;
 import 'agent_api.dart' show AgentRefusal;
@@ -747,9 +750,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 ),
               ] else if (host != null && _workspaces != null) ...[
                 SizedBox(height: t.sp * 0.5),
-                _Link(
+                TextAction(
                   key: const Key('launcher-new-workspace'),
-                  text: 'New workspace…',
+                  accent: true,
+                  label: 'New workspace…',
                   onTap: () => _openNewWorkspace(host),
                 ),
               ],
@@ -871,9 +875,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           ),
           Align(
             alignment: Alignment.centerLeft,
-            child: _Link(
+            child: TextAction(
               key: const Key('launcher-more'),
-              text: 'More: model, permission mode, crew, role ›',
+              accent: true,
+              label: 'More: model, permission mode, crew, role ›',
               onTap: () => setState(() {
                 _more = true;
                 _chipReason = null;
@@ -1134,9 +1139,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ),
           Align(
             alignment: Alignment.centerLeft,
-            child: _Link(
+            child: TextAction(
               key: const Key('launcher-fewer'),
-              text: 'Fewer options',
+              accent: true,
+              label: 'Fewer options',
               onTap: () => setState(() => _more = false),
             ),
           ),

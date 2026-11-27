@@ -588,6 +588,28 @@ void main() {
     await disposeShell(tester, c);
   });
 
+  testWidgets('the launcher renders its pieces; a hit beside the ✕ clears', (
+    tester,
+  ) async {
+    final agents = FakeAgentServer(hosts: [agentHost()]);
+    final c = await open(tester, agents, at: Routes.note(primary, 'n3'));
+    await tester.tap(find.byKey(const Key('start-session')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('launcher-close')), findsOneWidget);
+    expect(find.byKey(const Key('launcher-more')), findsOneWidget);
+    final x = tester.getRect(
+      find.descendant(
+        of: find.byKey(const Key('launcher-context-clear')),
+        matching: find.byType(Icon),
+      ),
+    );
+    await tester.tapAt(x.center - Offset(x.width / 2 + 4, 0));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('launcher-context')), findsNothing);
+    await disposeShell(tester, c);
+  });
+
   group('the launcher (handoff §3.5)', () {
     Future<void> launchFrom(
       WidgetTester tester, {
