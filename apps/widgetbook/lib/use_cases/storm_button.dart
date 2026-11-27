@@ -61,7 +61,9 @@ Widget stormButtonDisabled(BuildContext context) => Padding(
     spacing: 12,
     runSpacing: 12,
     children: [
-      for (final kind in StormButtonKind.values)
+      for (final kind in StormButtonKind.values.where(
+        (k) => k != StormButtonKind.dangerText,
+      ))
         StormButton(label: kind.name, kind: kind, onPressed: null),
     ],
   ),

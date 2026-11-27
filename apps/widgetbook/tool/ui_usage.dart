@@ -17,6 +17,8 @@ const sharedFiles = [
   'ui/popover.dart',
   'ui/rows.dart',
   'ui/surfaces.dart',
+  'ui/cards.dart',
+  'ui/tappable.dart',
   'ui/panels.dart',
   'ui/states.dart',
   'ui/session_status.dart',

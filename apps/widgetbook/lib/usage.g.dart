@@ -104,6 +104,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/settings/theme_picker.dart', 203),
     UsageSite('ui/settings/vaults_page.dart', 125),
   ],
+  'Hairline': <UsageSite>[],
   'IconBadgeButton': [
     UsageSite('agent/notifications_ui.dart', 710),
     UsageSite('agent/notifications_ui.dart', 718),
@@ -146,6 +147,7 @@ const componentUsage = <String, List<UsageSite>>{
   'NotificationRow': [UsageSite('agent/notifications_ui.dart', 917)],
   'NumberedSteps': [UsageSite('agent/agents_screen.dart', 329)],
   'OfflineNotice': [UsageSite('ui/note_editor.dart', 358)],
+  'OutlineTag': [UsageSite('ui/session_status.dart', 110)],
   'PopoverDivider': [
     UsageSite('agent/crew_add.dart', 125),
     UsageSite('agent/crew_widgets.dart', 784),
@@ -445,7 +447,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/note_header.dart', 27),
     UsageSite('ui/pairing_screen.dart', 485),
     UsageSite('ui/pairing_screen.dart', 493),
-    UsageSite('ui/panels.dart', 108),
+    UsageSite('ui/panels.dart', 110),
     UsageSite('ui/report_sheet.dart', 401),
     UsageSite('ui/settings/access_page.dart', 167),
     UsageSite('ui/settings/access_page.dart', 193),
@@ -466,6 +468,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/trash_screen.dart', 521),
     UsageSite('ui/trash_screen.dart', 723),
   ],
+  'StormCard': <UsageSite>[],
   'StormCheckbox': [
     UsageSite('ui/markdown/storm_markdown_view.dart', 103),
     UsageSite('ui/note_properties.dart', 482),
@@ -544,6 +547,7 @@ const componentUsage = <String, List<UsageSite>>{
   ],
   'TagChip': [UsageSite('ui/tags_panel.dart', 117)],
   'TagGroup': [UsageSite('ui/tags_panel.dart', 76)],
+  'Tappable': [UsageSite('ui/cards.dart', 73), UsageSite('ui/tags.dart', 103)],
   'TextAction': [
     UsageSite('agent/agents_hosts_parts.dart', 635),
     UsageSite('agent/agents_hosts_parts.dart', 644),
