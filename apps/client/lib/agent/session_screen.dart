@@ -16,7 +16,6 @@ import '../state/terminal_prefs.dart';
 import '../ui/breakpoints.dart';
 import '../ui/buttons.dart';
 import '../ui/cards.dart';
-import '../ui/controls.dart' show StormToggle;
 import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
 import '../ui/panels.dart';
@@ -644,37 +643,34 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               ),
               SizedBox(width: t.sp),
               if (!s.ended)
-                _HeaderButton(
+                StormButton.outline(
                   key: const Key('end-session'),
                   label: 'End',
-                  color: t.text2,
-                  outlined: true,
-                  onTap: () => _askEnd(s),
+                  onPressed: () => _askEnd(s),
                 )
               else ...[
                 if (_canResume(s)) ...[
-                  _HeaderButton(
+                  StormButton(
                     key: const Key('resume-session'),
                     label: 'Resume',
+                    kind: StormButtonKind.outline,
                     color: t.accent,
-                    outlined: true,
-                    onTap: _resuming ? null : () => _resume(s),
+                    onPressed: _resuming ? null : () => _resume(s),
                   ),
                   SizedBox(width: t.sp * 0.5),
                 ],
-                _HeaderButton(
+                StormButton(
                   key: const Key('run-again'),
                   label: 'Run again',
+                  kind: StormButtonKind.outline,
                   color: _canResume(s) ? t.text2 : t.accent,
-                  outlined: true,
-                  onTap: () => _runAgain(s),
+                  onPressed: () => _runAgain(s),
                 ),
                 SizedBox(width: t.sp * 0.5),
-                _HeaderButton(
+                StormButton.text(
                   key: const Key('dismiss-session'),
                   label: 'Dismiss',
-                  color: t.text2,
-                  onTap: () => _dismiss(s),
+                  onPressed: () => _dismiss(s),
                 ),
               ],
             ],
@@ -958,29 +954,36 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     children: [
                       if (_canResume(s)) ...[
                         Expanded(
-                          child: _BarButton(
+                          child: StormButton(
                             key: const Key('resume-session'),
                             label: 'Resume',
-                            primary: true,
-                            onTap: _resuming ? null : () => _resume(s),
+                            expand: true,
+                            onPressed: _resuming ? null : () => _resume(s),
                           ),
                         ),
                         SizedBox(width: t.sp),
                       ],
                       Expanded(
-                        child: _BarButton(
+                        child: StormButton(
                           key: const Key('run-again'),
                           label: 'Run again',
-                          primary: !_canResume(s),
-                          onTap: () => _runAgain(s),
+                          kind: _canResume(s)
+                              ? StormButtonKind.outline
+                              : StormButtonKind.primary,
+                          color: _canResume(s) ? t.text2 : null,
+                          expand: true,
+                          onPressed: () => _runAgain(s),
                         ),
                       ),
                       SizedBox(width: t.sp),
                       Expanded(
-                        child: _BarButton(
+                        child: StormButton(
                           key: const Key('dismiss-session'),
                           label: 'Dismiss',
-                          onTap: () => _dismiss(s),
+                          kind: StormButtonKind.outline,
+                          color: t.text2,
+                          expand: true,
+                          onPressed: () => _dismiss(s),
                         ),
                       ),
                     ],
@@ -1083,61 +1086,6 @@ class _Quiet extends StatelessWidget {
           fontSize: t.uiSize,
           height: 1.5,
           color: t.text3,
-        ),
-      ),
-    );
-  }
-}
-
-/// End, Run again and Dismiss in the session header: small, 13px.
-class _HeaderButton extends StatelessWidget {
-  const _HeaderButton({
-    super.key,
-    required this.label,
-    required this.color,
-    required this.onTap,
-    this.outlined = false,
-  });
-
-  final String label;
-  final Color color;
-  final VoidCallback? onTap;
-  final bool outlined;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final radius = BorderRadius.circular(t.rControl);
-    return Semantics(
-      button: true,
-      label: label,
-      excludeSemantics: true,
-      onTap: onTap,
-      child: Material(
-        color: Colors.transparent,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: outlined
-              ? BorderSide(color: t.border, width: t.bw)
-              : BorderSide.none,
-        ),
-        child: InkWell(
-          borderRadius: radius,
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.25,
-              vertical: t.sp * 0.625,
-            ),
-            child: Text(
-              label,
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.codeSize,
-                color: color,
-              ),
-            ),
-          ),
         ),
       ),
     );
@@ -1251,72 +1199,6 @@ class _PhoneHeader extends ConsumerWidget {
               ],
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// A half-width phone button: Run again, Dismiss, Cancel, End session.
-class _BarButton extends StatelessWidget {
-  const _BarButton({
-    super.key,
-    required this.label,
-    required this.onTap,
-    this.primary = false,
-    this.danger = false,
-    this.dangerText = false,
-  });
-
-  final String label;
-  final VoidCallback? onTap;
-  final bool primary;
-  final bool danger;
-  final bool dangerText;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final radius = BorderRadius.circular(t.rControl);
-    final fill = primary
-        ? t.accent
-        : danger
-        ? t.danger
-        : Colors.transparent;
-    final ink = primary || danger
-        ? t.onAccent
-        : dangerText
-        ? t.danger
-        : t.text2;
-    return Semantics(
-      button: true,
-      label: label,
-      excludeSemantics: true,
-      onTap: onTap,
-      child: Material(
-        color: fill,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: primary || danger
-              ? BorderSide.none
-              : BorderSide(color: t.border, width: t.bw),
-        ),
-        child: InkWell(
-          borderRadius: radius,
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
-            child: Text(
-              label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.uiSize,
-                fontWeight: primary ? FontWeight.w500 : FontWeight.w400,
-                color: ink,
-              ),
-            ),
-          ),
         ),
       ),
     );
@@ -2247,19 +2129,22 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
           Row(
             children: [
               Expanded(
-                child: _BarButton(
+                child: StormButton(
                   key: const Key('confirm-cancel'),
                   label: 'Cancel',
-                  onTap: () => setState(() => _confirm = false),
+                  kind: StormButtonKind.outline,
+                  color: t.text2,
+                  expand: true,
+                  onPressed: () => setState(() => _confirm = false),
                 ),
               ),
               SizedBox(width: t.sp),
               Expanded(
-                child: _BarButton(
+                child: StormButton.danger(
                   key: const Key('confirm-action'),
                   label: 'End session',
-                  danger: true,
-                  onTap: _ending
+                  expand: true,
+                  onPressed: _ending
                       ? null
                       : () async {
                           setState(() => _ending = true);
@@ -2276,11 +2161,13 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             ],
           ),
         ] else
-          _BarButton(
+          StormButton(
             key: const Key('end-session'),
             label: 'End session',
-            dangerText: true,
-            onTap: () {
+            kind: StormButtonKind.outline,
+            color: t.danger,
+            expand: true,
+            onPressed: () {
               final o = ref.read(agentOverviewProvider).value;
               final kids =
                   o != null && childrenOf(o, s.id).any((k) => !k.ended);

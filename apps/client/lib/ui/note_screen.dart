@@ -292,6 +292,23 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
 
   @override
   Widget build(BuildContext context) {
+    Widget headerIcon(IconData icon, String tooltip, VoidCallback onTap) {
+      final t = context.tokens;
+      return Tappable(
+        tooltip: tooltip,
+        semanticLabel: tooltip,
+        borderRadius: BorderRadius.circular(t.rPill),
+        onTap: onTap,
+        child: SizedBox(
+          width: t.sp * 4,
+          height: t.sp * 4,
+          child: Center(
+            child: Icon(icon, size: t.headingSize, color: t.text3),
+          ),
+        ),
+      );
+    }
+
     ref.watch(syncListenerProvider);
     ref.listen(noteSessionProvider, (_, s) => _markSeen(s));
     final session = ref.watch(noteSessionProvider);
@@ -363,15 +380,15 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                   if (wide)
                     DrawerToggle(open: showProperties, onTap: toggleDrawer)
                   else ...[
-                    _HeaderButton(
-                      icon: LucideIcons.ellipsis,
-                      tooltip: 'Note actions',
-                      onTap: () => _noteActions(isPinned),
+                    headerIcon(
+                      LucideIcons.ellipsis,
+                      'Note actions',
+                      () => _noteActions(isPinned),
                     ),
-                    _HeaderButton(
-                      icon: LucideIcons.sliders_horizontal,
-                      tooltip: 'Properties',
-                      onTap: () => PropertiesPanel.showSheet(
+                    headerIcon(
+                      LucideIcons.sliders_horizontal,
+                      'Properties',
+                      () => PropertiesPanel.showSheet(
                         context,
                         content: session.buffer,
                         onChanged: session.editProperties,
@@ -454,37 +471,6 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       ),
     );
     action?.call();
-  }
-}
-
-class _HeaderButton extends StatelessWidget {
-  const _HeaderButton({
-    required this.icon,
-    required this.tooltip,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        onTap: onTap,
-        customBorder: const CircleBorder(),
-        child: SizedBox(
-          width: t.sp * 4,
-          height: t.sp * 4,
-          child: Center(
-            child: Icon(icon, size: t.headingSize, color: t.text3),
-          ),
-        ),
-      ),
-    );
   }
 }
 
