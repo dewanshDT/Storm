@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'controls.dart';
+import 'cards.dart';
+import 'tappable.dart';
 import 'tokens.dart';
 
 /// Whether a strip waits on the person (an agent asked) or confirms what the
@@ -417,60 +419,55 @@ class CompactDecisionStrip extends StatelessWidget {
     return Semantics(
       container: true,
       liveRegion: true,
-      child: Container(
+      child: Padding(
         key: const Key('decision-compact'),
         // 12 from the edges, as r14 draws it.
-        margin: EdgeInsets.fromLTRB(
-          t.sp * 1.5,
-          t.sp * 1.25,
-          t.sp * 1.5,
-          t.sp * 1.25,
-        ),
         padding: EdgeInsets.fromLTRB(
           t.sp * 1.5,
-          t.sp * 0.5,
-          t.sp * 0.5,
-          t.sp * 0.5,
+          t.sp * 1.25,
+          t.sp * 1.5,
+          t.sp * 1.25,
         ),
-        decoration: BoxDecoration(
+        child: StormCard(
           color: Color.alphaBlend(t.danger.withValues(alpha: 0.08), t.bg),
-          borderRadius: BorderRadius.circular(t.rControl),
-          border: Border.all(color: t.danger, width: t.bw),
-        ),
-        child: Row(
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                fontFamily: StormTokens.monoFamily,
-                fontSize: t.labelSize,
-                letterSpacing: t.labelSize * 0.08,
-                color: t.danger,
-              ),
-            ),
-            SizedBox(width: t.sp * 1.25),
-            Expanded(
-              child: Text(
-                title,
-                key: const Key('decision-title'),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+          radius: t.rControl,
+          borderColor: t.danger,
+          padding: EdgeInsets.fromLTRB(
+            t.sp * 1.5,
+            t.sp * 0.5,
+            t.sp * 0.5,
+            t.sp * 0.5,
+          ),
+          child: Row(
+            children: [
+              Text(
+                label,
                 style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  color: t.text,
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  letterSpacing: t.labelSize * 0.08,
+                  color: t.danger,
                 ),
               ),
-            ),
-            // A link, not a button. In `text`, not the frame's `accent`:
-            // `accent` on the tint misses 4.5:1 in dark and earth (153-8).
-            Semantics(
-              button: true,
-              label: 'Review',
-              excludeSemantics: true,
-              onTap: onReview,
-              child: InkWell(
+              SizedBox(width: t.sp * 1.25),
+              Expanded(
+                child: Text(
+                  title,
+                  key: const Key('decision-title'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.codeSize,
+                    color: t.text,
+                  ),
+                ),
+              ),
+              // A link, not a button. In `text`, not the frame's `accent`:
+              // `accent` on the tint misses 4.5:1 in dark and earth (153-8).
+              Tappable(
                 key: const Key('decision-review'),
+                semanticLabel: 'Review',
                 onTap: onReview,
                 borderRadius: BorderRadius.circular(t.rControl),
                 child: Padding(
@@ -489,8 +486,8 @@ class CompactDecisionStrip extends StatelessWidget {
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
