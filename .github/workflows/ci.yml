@@ -527,8 +527,8 @@ jobs:
       - run: flutter analyze
       - run: flutter test
 
-  # Decision 164: the component catalogue. Its `directories` file is committed,
-  # so there is no build_runner step here; `make test-widgetbook` checks it.
+  # Decision 164: the component catalogue. Its `directories` file is committed;
+  # regenerating it and diffing is what catches a use case added without it.
   widgetbook:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.widgetbook == 'true'
@@ -552,6 +552,8 @@ jobs:
       - run: flutter pub get
       - run: dart format --set-exit-if-changed lib test
       - run: flutter analyze
+      - run: dart run build_runner build
+      - run: git diff --exit-code -- lib/main.directories.g.dart
       - run: flutter test
 
   # The desktop runners are native code the Dart suite never compiles
