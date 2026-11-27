@@ -2,7 +2,6 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:storm/ui/panels.dart';
 import 'package:storm/ui/session_status.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/widgets.dart';
@@ -32,22 +31,6 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
-
-  for (final wrap in [false, true]) {
-    testWidgets('PanelTabs long labels, wrap: $wrap', (tester) async {
-      await tester.pumpWidget(
-        _host(
-          PanelTabs<String>(
-            tabs: const [('a', long), ('b', long)],
-            selected: 'a',
-            onSelected: (_) {},
-            wrap: wrap,
-          ),
-        ),
-      );
-      expect(tester.takeException(), isNull);
-    });
-  }
 
   testWidgets('ImageThumbnail falls back when the image is broken', (
     tester,

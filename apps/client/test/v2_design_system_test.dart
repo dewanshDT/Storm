@@ -4,11 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/ui/controls.dart';
 import 'package:storm/ui/session_status.dart';
 import 'package:storm/ui/shell/sidebar_frame.dart';
-import 'package:storm/ui/states.dart';
 import 'package:storm/ui/surfaces.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
-import 'package:flutter_lucide/flutter_lucide.dart';
 
 void main() {
   final t = StormTokens.from(StormPreset.stormDark);
@@ -183,18 +181,6 @@ void main() {
       );
       expect(find.text('act-1'), findsNothing);
       expect(find.text('act-2'), findsOneWidget);
-    });
-
-    testWidgets('EmptyState carries them', (tester) async {
-      await pump(
-        tester,
-        const EmptyState(
-          icon: LucideIcons.server,
-          title: 'No host yet',
-          steps: [NumberedStep('Enroll a host'), NumberedStep('Start')],
-        ),
-      );
-      expect(find.byType(NumberedSteps), findsOneWidget);
     });
   });
 

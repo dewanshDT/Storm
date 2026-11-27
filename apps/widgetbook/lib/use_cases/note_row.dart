@@ -19,7 +19,6 @@ Widget noteRowDefault(BuildContext context) => NoteRow(
   ),
   divider: context.knobs.boolean(label: 'divider', initialValue: true),
   selected: context.knobs.boolean(label: 'selected'),
-  dense: context.knobs.boolean(label: 'dense'),
   leading: context.knobs.boolean(label: 'leading')
       ? Icon(LucideIcons.file_text, size: 18, color: context.tokens.text2)
       : null,
@@ -37,22 +36,6 @@ Widget noteRowSelected(BuildContext context) => NoteRow(
   meta: 'Projects · 2h ago',
   selected: true,
   onTap: () {},
-);
-
-@widgetbook.UseCase(name: 'dense (sidebar)', type: NoteRow, path: _path)
-Widget noteRowDense(BuildContext context) => Padding(
-  padding: const EdgeInsets.all(8),
-  child: Column(
-    children: [
-      NoteRow(title: 'Sprint Retro', dense: true, onTap: () {}),
-      NoteRow(
-        title: 'Weekly review',
-        dense: true,
-        selected: true,
-        onTap: () {},
-      ),
-    ],
-  ),
 );
 
 @widgetbook.UseCase(name: 'disabled (no onTap)', type: NoteRow, path: _path)

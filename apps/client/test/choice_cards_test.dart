@@ -41,7 +41,6 @@ void main() {
     int? selected = 1,
     ValueChanged<int>? onSelected,
     int count = 3,
-    double minCardWidth = 220,
   }) => ChoiceCards<int>(
     options: [
       for (var i = 1; i <= count; i++)
@@ -58,7 +57,6 @@ void main() {
     ],
     selected: selected,
     onSelected: onSelected,
-    minCardWidth: minCardWidth,
   );
 
   testWidgets('selects by value and marks the selection as ChoiceChips do', (

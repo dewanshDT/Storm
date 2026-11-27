@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:storm/ui/widgets.dart';
 import 'package:widgetbook/widgetbook.dart';
 import 'package:widgetbook_annotation/widgetbook_annotation.dart' as widgetbook;
@@ -17,9 +16,6 @@ Widget stormInputDefault(BuildContext context) => _pad(
       initialValue: 'Search notes',
     ),
     labelText: context.knobs.stringOrNull(label: 'labelText'),
-    prefixIcon: context.knobs.boolean(label: 'prefixIcon')
-        ? LucideIcons.search
-        : null,
     obscureText: context.knobs.boolean(label: 'obscureText'),
     enabled: context.knobs.boolean(label: 'enabled', initialValue: true),
     minLines: context.knobs.int.slider(
@@ -46,13 +42,8 @@ Widget stormInputText(BuildContext context) => _pad(
 );
 
 @widgetbook.UseCase(name: 'disabled', type: StormInput, path: _path)
-Widget stormInputDisabled(BuildContext context) => _pad(
-  const StormInput(
-    hintText: 'Search notes',
-    prefixIcon: LucideIcons.search,
-    enabled: false,
-  ),
-);
+Widget stormInputDisabled(BuildContext context) =>
+    _pad(const StormInput(hintText: 'Search notes', enabled: false));
 
 @widgetbook.UseCase(name: 'multiline', type: StormInput, path: _path)
 Widget stormInputMultiline(BuildContext context) => _pad(
@@ -79,7 +70,6 @@ Widget stormInputLong(BuildContext context) => _pad(
             'has to scroll sideways rather than grow the box',
       ),
       labelText: 'A label that is also rather long for this field',
-      prefixIcon: LucideIcons.search,
     ),
   ),
 );

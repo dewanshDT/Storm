@@ -70,16 +70,6 @@ void main() {
       );
       expect(d.borderRadius, isNull);
     });
-
-    testWidgets('but the tree keeps its pill', (tester) async {
-      // There a row *is* a standalone thing you select, and the selected
-      // background needs a shape.
-      final d = await decorationOf(
-        tester,
-        const NoteRow(title: 'Codebase Map', dense: true, selected: true),
-      );
-      expect(d.borderRadius, isNotNull);
-    });
   });
 
   Widget wrap(Widget child, {StormPreset preset = StormPreset.stormDark}) =>

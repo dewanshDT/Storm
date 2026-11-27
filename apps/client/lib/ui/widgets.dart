@@ -389,60 +389,6 @@ class IconBadgeButton extends StatelessWidget {
   }
 }
 
-/// A list row with an unread dot (filled when [unread], hollow otherwise),
-/// [child] as its content, and [onTap] (none disables the row). The
-/// inbox's own rows (decision 161) are this; any list of notices or events
-/// with a read/unread state should be too, rather than a one-off
-/// `Container`-and-dot.
-class UnreadRow extends StatelessWidget {
-  const UnreadRow({
-    super.key,
-    required this.unread,
-    required this.child,
-    this.onTap,
-  });
-
-  final bool unread;
-  final Widget child;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final row = Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: t.sp * 0.75,
-        vertical: t.sp * 0.875,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: EdgeInsets.only(top: t.sp * 0.375),
-            child: Semantics(
-              label: unread ? 'Unread' : null,
-              child: Container(
-                width: t.sp * 0.75,
-                height: t.sp * 0.75,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: unread ? t.accent : Colors.transparent,
-                  border: unread
-                      ? null
-                      : Border.all(color: t.border, width: t.bw),
-                ),
-              ),
-            ),
-          ),
-          SizedBox(width: t.sp * 0.75),
-          Expanded(child: child),
-        ],
-      ),
-    );
-    return onTap == null ? row : InkWell(onTap: onTap, child: row);
-  }
-}
-
 /// A small tinted circle around an icon, or a custom glyph in place of one
 /// — the inbox's own leading mark for what a notice is (decision 161's
 /// redesign): a question for needs you, danger for an error, and so on,
@@ -905,7 +851,6 @@ class StormInput extends StatelessWidget {
     this.focusNode,
     this.hintText,
     this.labelText,
-    this.prefixIcon,
     this.suffix,
     this.autofocus = false,
     this.obscureText = false,
@@ -925,7 +870,6 @@ class StormInput extends StatelessWidget {
   final FocusNode? focusNode;
   final String? hintText;
   final String? labelText;
-  final IconData? prefixIcon;
   final Widget? suffix;
   final bool autofocus;
   final bool obscureText;
@@ -970,12 +914,6 @@ class StormInput extends StatelessWidget {
         isDense: true,
         hintText: hintText,
         labelText: labelText,
-        prefixIcon: prefixIcon == null
-            ? null
-            : Icon(prefixIcon, size: t.bodySize, color: t.text3),
-        prefixIconConstraints: prefixIcon == null
-            ? null
-            : BoxConstraints(minWidth: t.sp * 4.5, minHeight: t.sp * 2),
         suffixIcon: suffix,
       ),
     );
@@ -1098,17 +1036,15 @@ class ImageThumbnail extends StatelessWidget {
     super.key,
     required this.image,
     required this.onRemove,
-    this.size,
   });
 
   final ImageProvider image;
   final VoidCallback onRemove;
-  final double? size;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final side = size ?? t.sp * 11;
+    final side = t.sp * 11;
     return SizedBox(
       width: side,
       height: side,
@@ -1322,43 +1258,6 @@ enum PopoverTone { normal, accent, muted, danger }
 TextStyle popoverItemStyle(StormTokens t) =>
     TextStyle(fontFamily: StormTokens.sansFamily, fontSize: t.codeSize);
 
-/// A number and what it counts, as the dashboard shows them.
-class StatBlock extends StatelessWidget {
-  const StatBlock({super.key, required this.value, required this.label});
-
-  final String value;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          value,
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.headingSize * 1.3,
-            fontWeight: FontWeight.w600,
-            color: t.text,
-            height: 1.1,
-          ),
-        ),
-        Text(
-          label,
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.codeSize,
-            color: t.text3,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 // ---- rows, bars and cards -------------------------------------------
 
 /// A note in a list: title and one metadata line.
@@ -1374,7 +1273,6 @@ class NoteRow extends StatelessWidget {
     this.divider = false,
     this.selected = false,
     this.padding,
-    this.dense = false,
   });
 
   final String title;
@@ -1387,31 +1285,19 @@ class NoteRow extends StatelessWidget {
   final bool selected;
   final EdgeInsetsGeometry? padding;
 
-  /// The sidebar's step down: the design's tree is set at 13px where a
-  /// full-width list row is 15.
-  final bool dense;
-
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
-      // Rounded only in the sidebar's tree, where a row is a standalone thing
-      // you select. In a divided list it is a row, and a radius there draws a
-      // card around every entry — and worse, Flutter renders a bottom-only
-      // border on a rounded decoration as the bottom *arc* of that rect, so
-      // the rule under the last row curled up at both ends.
-      borderRadius: dense
-          ? BorderRadius.circular(t.rControl)
-          : BorderRadius.zero,
+      borderRadius: BorderRadius.zero,
       child: Container(
         padding:
             padding ??
             EdgeInsets.symmetric(horizontal: t.sp * 1.75, vertical: t.sp * 2),
         decoration: BoxDecoration(
           color: selected ? t.accentSoft : null,
-          borderRadius: dense ? BorderRadius.circular(t.rControl) : null,
           border: divider
               ? Border(
                   bottom: BorderSide(color: t.border, width: t.bw),
@@ -1432,9 +1318,9 @@ class NoteRow extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontFamily: StormTokens.sansFamily,
-                      fontSize: dense ? t.codeSize : t.bodySize * 0.95,
-                      fontWeight: dense ? FontWeight.w400 : FontWeight.w600,
-                      color: dense ? t.text2 : t.text,
+                      fontSize: t.bodySize * 0.95,
+                      fontWeight: FontWeight.w600,
+                      color: t.text,
                       height: 1.3,
                     ),
                   ),
@@ -1473,9 +1359,7 @@ class FolderRow extends StatelessWidget {
     this.onLongPress,
     this.divider = false,
     this.leading,
-    this.chevron = true,
     this.padding,
-    this.dense = false,
   });
 
   final String name;
@@ -1486,11 +1370,7 @@ class FolderRow extends StatelessWidget {
 
   /// Replaces the folder glyph — the sidebar tree passes its twisty.
   final Widget? leading;
-  final bool chevron;
   final EdgeInsetsGeometry? padding;
-
-  /// See [NoteRow.dense].
-  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -1498,9 +1378,7 @@ class FolderRow extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
-      borderRadius: dense
-          ? BorderRadius.circular(t.rControl)
-          : BorderRadius.zero,
+      borderRadius: BorderRadius.zero,
       child: Container(
         padding:
             padding ??
@@ -1521,7 +1399,7 @@ class FolderRow extends StatelessWidget {
             // on the same screen.
             leading ??
                 StormIcon(StormGlyph.folder, size: t.bodySize, color: t.text2),
-            SizedBox(width: dense ? t.sp : t.sp * 1.5),
+            SizedBox(width: t.sp * 1.5),
             Expanded(
               child: Text(
                 name,
@@ -1529,9 +1407,9 @@ class FolderRow extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
-                  fontSize: dense ? t.codeSize : t.bodySize * 0.95,
+                  fontSize: t.bodySize * 0.95,
                   fontWeight: FontWeight.w500,
-                  color: dense ? t.text2 : t.text,
+                  color: t.text,
                 ),
               ),
             ),
@@ -1540,14 +1418,12 @@ class FolderRow extends StatelessWidget {
                 '$count',
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
-                  fontSize: dense ? t.labelSize : t.codeSize,
+                  fontSize: t.codeSize,
                   color: t.text3,
                 ),
               ),
-            if (chevron) ...[
-              SizedBox(width: t.sp * 0.75),
-              Icon(LucideIcons.chevron_right, size: t.bodySize, color: t.text2),
-            ],
+            SizedBox(width: t.sp * 0.75),
+            Icon(LucideIcons.chevron_right, size: t.bodySize, color: t.text2),
           ],
         ),
       ),
@@ -1660,175 +1536,6 @@ class TagGroup extends StatelessWidget {
           ],
         ),
       ],
-    );
-  }
-}
-
-/// `v12 · Saved`, with the save error if there is one.
-class StatusBar extends StatelessWidget {
-  const StatusBar({
-    super.key,
-    required this.version,
-    required this.label,
-    required this.tone,
-    this.error,
-  });
-
-  final int version;
-  final String label;
-  final SaveTone tone;
-  final String? error;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final mono = TextStyle(
-      fontFamily: StormTokens.monoFamily,
-      fontSize: t.labelSize,
-      color: t.text3,
-    );
-
-    return Row(
-      children: [
-        Text('v$version', style: mono),
-        Text('  ·  ', style: mono),
-        SaveStateLabel(label: label, tone: tone),
-        const Spacer(),
-        if (error != null) ...[
-          Icon(
-            LucideIcons.circle_alert,
-            size: t.labelSize * 1.2,
-            color: t.danger,
-          ),
-          SizedBox(width: t.sp * 0.5),
-          Flexible(
-            child: Text(
-              error!,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: mono.copyWith(color: t.danger),
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-/// A vault on the dashboard: initial on an accent tile, name, count, status.
-class VaultCard extends StatelessWidget {
-  const VaultCard({
-    super.key,
-    required this.name,
-    required this.tile,
-    required this.subtitle,
-    this.status,
-    this.muted = false,
-    this.tinted = true,
-    this.onTap,
-    this.onLongPress,
-  });
-
-  final String name;
-
-  /// The accent ground behind the initial, already resolved for this theme.
-  final Color tile;
-
-  /// False when [tile] is the neutral surface rather than an accent, which is
-  /// what an uncoloured vault gets. [kTileInk] on it is black on near-black.
-  final bool tinted;
-  final String subtitle;
-  final DotStatus? status;
-  final bool muted;
-  final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
-
-  static String initialOf(String name) {
-    final trimmed = name.trim();
-    return trimmed.isEmpty ? 'S' : trimmed.characters.first.toUpperCase();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final side = t.sp * 5;
-
-    return InkWell(
-      borderRadius: BorderRadius.circular(t.rCard),
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: Container(
-        padding: EdgeInsets.all(t.cardPad * 0.6),
-        decoration: BoxDecoration(
-          color: t.surface,
-          borderRadius: BorderRadius.circular(t.rCard),
-          border: Border.all(
-            color: muted ? t.danger.withValues(alpha: 0.5) : t.border,
-            width: t.bw,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: side,
-              height: side,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: muted ? t.danger.withValues(alpha: 0.15) : tile,
-                borderRadius: BorderRadius.circular(t.rControl),
-              ),
-              child: Text(
-                initialOf(name),
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  fontWeight: FontWeight.w600,
-                  color: muted
-                      ? t.danger
-                      : tinted
-                      ? kTileInk
-                      : t.text2,
-                ),
-              ),
-            ),
-            SizedBox(height: t.sp * 1.25),
-            Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.codeSize,
-                fontWeight: FontWeight.w600,
-                color: t.text,
-              ),
-            ),
-            SizedBox(height: t.sp * 0.5),
-            Row(
-              children: [
-                if (status != null) ...[
-                  StatusDot(status: status!, size: t.sp * 0.75),
-                  SizedBox(width: t.sp * 0.75),
-                ],
-                Flexible(
-                  child: Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.labelSize,
-                      color: t.text3,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

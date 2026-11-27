@@ -379,21 +379,21 @@ class ChoiceCardOption<T> {
   final Key? key;
 }
 
-/// Equal-width [ChoiceCard]s filling the width, as many per row as fit at
-/// [minCardWidth]; cards in a row share a height.
+/// Equal-width selectable cards filling the width, as many per row as fit at
+/// 220; cards in a row share a height.
 class ChoiceCards<T> extends StatelessWidget {
   const ChoiceCards({
     super.key,
     required this.options,
     required this.selected,
     required this.onSelected,
-    this.minCardWidth = 220,
   });
 
   final List<ChoiceCardOption<T>> options;
   final T? selected;
   final ValueChanged<T>? onSelected;
-  final double minCardWidth;
+
+  static const _minCardWidth = 220;
 
   @override
   Widget build(BuildContext context) {
@@ -401,10 +401,10 @@ class ChoiceCards<T> extends StatelessWidget {
     final gap = t.gap;
     return LayoutBuilder(
       builder: (context, box) {
-        final cols = ((box.maxWidth + gap) / (minCardWidth + gap))
+        final cols = ((box.maxWidth + gap) / (_minCardWidth + gap))
             .floor()
             .clamp(1, options.isEmpty ? 1 : options.length);
-        Widget card(ChoiceCardOption<T> o) => ChoiceCard(
+        Widget card(ChoiceCardOption<T> o) => _ChoiceCard(
           key: o.key,
           title: o.title,
           subtitle: o.subtitle,
@@ -449,8 +449,8 @@ class ChoiceCards<T> extends StatelessWidget {
 /// pressed, `accent` on `accentSoft` when selected (as [ChoiceChips]), an
 /// `accent` ring when focused from the keyboard, and dimmed when [onTap] is
 /// null.
-class ChoiceCard extends StatefulWidget {
-  const ChoiceCard({
+class _ChoiceCard extends StatefulWidget {
+  const _ChoiceCard({
     super.key,
     required this.title,
     required this.selected,
@@ -472,10 +472,10 @@ class ChoiceCard extends StatefulWidget {
   final VoidCallback? onTap;
 
   @override
-  State<ChoiceCard> createState() => _ChoiceCardState();
+  State<_ChoiceCard> createState() => _ChoiceCardState();
 }
 
-class _ChoiceCardState extends State<ChoiceCard> {
+class _ChoiceCardState extends State<_ChoiceCard> {
   bool _hover = false;
   bool _pressed = false;
   bool _focusRing = false;

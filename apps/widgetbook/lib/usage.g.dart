@@ -17,7 +17,6 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/starting_screen.dart', 21),
   ],
   'Breadcrumb': <UsageSite>[],
-  'ChoiceCard': <UsageSite>[],
   'ChoiceCards': [UsageSite('ui/settings/theme_picker.dart', 50)],
   'ChoiceChips': [
     UsageSite('agent/hosts_screen.dart', 268),
@@ -144,12 +143,8 @@ const componentUsage = <String, List<UsageSite>>{
   'NoteRow': [UsageSite('ui/tags_panel.dart', 139)],
   'NotificationGroupRow': [UsageSite('agent/notifications_ui.dart', 888)],
   'NotificationRow': [UsageSite('agent/notifications_ui.dart', 917)],
-  'NumberedSteps': [
-    UsageSite('agent/agents_screen.dart', 329),
-    UsageSite('ui/states.dart', 91),
-  ],
+  'NumberedSteps': [UsageSite('agent/agents_screen.dart', 329)],
   'OfflineNotice': [UsageSite('ui/note_editor.dart', 358)],
-  'PanelTabs': <UsageSite>[],
   'PopoverDivider': [
     UsageSite('agent/crew_add.dart', 125),
     UsageSite('agent/crew_widgets.dart', 784),
@@ -391,12 +386,10 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/tags_panel.dart', 124),
     UsageSite('ui/trash_screen.dart', 285),
   ],
-  'StatBlock': <UsageSite>[],
-  'StatusBar': <UsageSite>[],
   'StatusDot': [
     UsageSite('ui/shell/corner_bubbles.dart', 106),
     UsageSite('ui/shell/corner_bubbles.dart', 114),
-    UsageSite('ui/states.dart', 213),
+    UsageSite('ui/states.dart', 204),
   ],
   'StatusPill': [
     UsageSite('agent/claude_login_screen.dart', 414),
@@ -450,7 +443,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/note_header.dart', 27),
     UsageSite('ui/pairing_screen.dart', 485),
     UsageSite('ui/pairing_screen.dart', 493),
-    UsageSite('ui/panels.dart', 187),
+    UsageSite('ui/panels.dart', 116),
     UsageSite('ui/report_sheet.dart', 401),
     UsageSite('ui/settings/access_page.dart', 167),
     UsageSite('ui/settings/access_page.dart', 193),
@@ -470,7 +463,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/trash_screen.dart', 248),
     UsageSite('ui/trash_screen.dart', 521),
     UsageSite('ui/trash_screen.dart', 723),
-    UsageSite('ui/widgets.dart', 1222),
+    UsageSite('ui/widgets.dart', 1158),
   ],
   'StormCheckbox': [
     UsageSite('ui/markdown/storm_markdown_view.dart', 103),
@@ -483,7 +476,7 @@ const componentUsage = <String, List<UsageSite>>{
   ],
   'StormIcon': [
     UsageSite('ui/shell/vault_sidebar.dart', 214),
-    UsageSite('ui/widgets.dart', 1523),
+    UsageSite('ui/widgets.dart', 1401),
   ],
   'StormInput': [
     UsageSite('ui/lan_servers.dart', 747),
@@ -613,12 +606,10 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/settings/access_page.dart', 353),
     UsageSite('ui/shell/vault_sidebar.dart', 356),
   ],
-  'UnreadRow': <UsageSite>[],
   'UnseenDot': [
     UsageSite('agent/agent_widgets.dart', 326),
     UsageSite('ui/browse_screen.dart', 313),
   ],
-  'VaultCard': <UsageSite>[],
   'VaultTag': [
     UsageSite('ui/palette/palette_rows.dart', 153),
     UsageSite('ui/shell/vault_sidebar.dart', 154),

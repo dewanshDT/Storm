@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
-import 'package:storm/ui/controls.dart';
 import 'package:storm/ui/states.dart';
 import 'package:widgetbook/widgetbook.dart';
 import 'package:widgetbook_annotation/widgetbook_annotation.dart' as widgetbook;
@@ -12,8 +11,6 @@ Widget _empty(
   String title = 'Nothing in this folder',
   String? detail = 'New notes made here will land in Projects.',
   String? action = 'New note',
-  List<NumberedStep>? steps,
-  int step = 0,
   bool fill = false,
 }) => EmptyState(
   icon: LucideIcons.folder_open,
@@ -21,8 +18,6 @@ Widget _empty(
   detail: detail,
   action: action,
   onAction: action == null ? null : () {},
-  steps: steps,
-  currentStep: step,
   fill: fill,
 );
 
@@ -44,25 +39,6 @@ Widget emptyStateDefault(BuildContext context) => _empty(
 @widgetbook.UseCase(name: 'title only', type: EmptyState, path: _path)
 Widget emptyStateTitleOnly(BuildContext context) =>
     _empty(context, detail: null, action: null);
-
-@widgetbook.UseCase(name: 'with steps', type: EmptyState, path: _path)
-Widget emptyStateSteps(BuildContext context) => _empty(
-  context,
-  title: 'No sessions yet',
-  detail: 'Three steps to your first agent session.',
-  action: null,
-  step: context.knobs.int.slider(
-    label: 'currentStep',
-    initialValue: 0,
-    min: 0,
-    max: 2,
-  ),
-  steps: const [
-    NumberedStep('Enroll a host'),
-    NumberedStep('Sign Claude Code or OpenCode in on that host'),
-    NumberedStep('Start a session'),
-  ],
-);
 
 @widgetbook.UseCase(name: 'long text (overflow)', type: EmptyState, path: _path)
 Widget emptyStateLong(BuildContext context) => _empty(

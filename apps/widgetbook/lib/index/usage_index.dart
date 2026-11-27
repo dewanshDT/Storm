@@ -37,8 +37,8 @@ class SharedUsageTable extends StatelessWidget {
     final unused = names.where((n) => usage[n]!.isEmpty).length;
     return _Page(
       stats: [
-        StatBlock(value: '${usage.length}', label: 'shared components'),
-        StatBlock(value: '$unused', label: 'with no use'),
+        _Stat(value: '${usage.length}', label: 'shared components'),
+        _Stat(value: '$unused', label: 'with no use'),
       ],
       children: [
         for (final name in names)
@@ -75,10 +75,10 @@ class CandidateList extends StatelessWidget {
       });
     return _Page(
       stats: [
-        StatBlock(value: '${sites.length}', label: 'candidates'),
-        StatBlock(value: '${files.length}', label: 'files'),
+        _Stat(value: '${sites.length}', label: 'candidates'),
+        _Stat(value: '${files.length}', label: 'files'),
         for (final kind in CandidateKind.values)
-          StatBlock(
+          _Stat(
             value: '${sites.where((s) => s.kind == kind).length}',
             label: kind.label,
           ),
@@ -185,6 +185,42 @@ class _GroupState extends State<_Group> {
             ),
         ],
       ),
+    );
+  }
+}
+
+class _Stat extends StatelessWidget {
+  const _Stat({required this.value, required this.label});
+
+  final String value;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          value,
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: t.headingSize * 1.3,
+            fontWeight: FontWeight.w600,
+            color: t.text,
+            height: 1.1,
+          ),
+        ),
+        Text(
+          label,
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: t.codeSize,
+            color: t.text3,
+          ),
+        ),
+      ],
     );
   }
 }
