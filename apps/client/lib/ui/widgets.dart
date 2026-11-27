@@ -110,7 +110,7 @@ class TagChip extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.25),
       decoration: BoxDecoration(
         color: t.amberSoft,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(t.rPill),
       ),
       child: Text(
         label,
@@ -125,7 +125,7 @@ class TagChip extends StatelessWidget {
     if (onTap == null) return chip;
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
+      borderRadius: BorderRadius.circular(t.rPill),
       child: chip,
     );
   }
@@ -147,7 +147,7 @@ class KeyChip extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.35),
       decoration: BoxDecoration(
         color: t.surface2,
-        borderRadius: BorderRadius.circular(t.rControl * 0.6),
+        borderRadius: BorderRadius.circular(t.rChip),
       ),
       child: Text(
         label,
@@ -255,15 +255,7 @@ class SectionLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Text(
-      text.toUpperCase(),
-      style: TextStyle(
-        fontFamily: StormTokens.monoFamily,
-        fontSize: t.labelSize,
-        letterSpacing: t.labelSize * 0.08,
-        color: t.text3,
-      ),
-    );
+    return Text(text.toUpperCase(), style: t.labelStyle);
   }
 }
 
@@ -298,7 +290,7 @@ class CountBadge extends StatelessWidget {
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: color,
-          borderRadius: BorderRadius.circular(999),
+          borderRadius: BorderRadius.circular(t.rPill),
         ),
         child: Text(
           count > cap ? '$cap+' : '$count',
@@ -505,7 +497,7 @@ class _RowMenuButton extends StatelessWidget {
       onTap: onTap,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl * 0.6),
+        borderRadius: BorderRadius.circular(t.rChip),
         child: Padding(
           padding: EdgeInsets.all(t.sp * 0.375),
           child: Icon(
@@ -948,7 +940,7 @@ class StormCheckbox extends StatelessWidget {
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: value ? t.accent : null,
-          borderRadius: BorderRadius.circular(t.rControl * 0.5),
+          borderRadius: BorderRadius.circular(t.rInner),
           border: value ? null : Border.all(color: t.text3, width: t.bw * 1.5),
         ),
         child: value
@@ -1006,7 +998,7 @@ class StormCheckboxRow extends StatelessWidget {
         opacity: live ? 1 : 0.5,
         child: InkWell(
           onTap: live ? () => onChanged!(!value) : null,
-          borderRadius: borderRadius ?? BorderRadius.circular(t.rControl * 0.6),
+          borderRadius: borderRadius ?? BorderRadius.circular(t.rChip),
           child: Padding(
             padding: padding ?? EdgeInsets.symmetric(vertical: t.sp * 0.5),
             child: Row(
@@ -1207,13 +1199,13 @@ class PopoverItem extends StatelessWidget {
 
     final item = InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(t.rControl * 0.8),
+      borderRadius: BorderRadius.circular(t.rTile),
       child: Container(
         width: double.infinity,
         padding: EdgeInsets.symmetric(horizontal: t.sp * 0.75, vertical: t.sp),
         decoration: BoxDecoration(
           color: selected ? t.accentSoft : null,
-          borderRadius: BorderRadius.circular(t.rControl * 0.8),
+          borderRadius: BorderRadius.circular(t.rTile),
         ),
         child: Row(
           children: [

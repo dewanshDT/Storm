@@ -27,15 +27,7 @@ class KeyValueList extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  rows[i].$1.toUpperCase(),
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.labelSize,
-                    letterSpacing: t.labelSize * 0.08,
-                    color: t.text3,
-                  ),
-                ),
+                Text(rows[i].$1.toUpperCase(), style: t.labelStyle),
                 SizedBox(height: t.sp * 0.375),
                 Text(
                   rows[i].$2,
@@ -196,7 +188,7 @@ class MonoTag extends StatelessWidget {
         vertical: t.sp * 0.125,
       ),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(t.rControl * 0.5),
+        borderRadius: BorderRadius.circular(t.rInner),
         border: Border.all(color: t.border, width: t.bw),
       ),
       child: Text(

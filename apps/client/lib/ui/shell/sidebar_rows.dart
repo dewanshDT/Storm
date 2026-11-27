@@ -17,7 +17,7 @@ class VaultTag extends StatelessWidget {
     return Container(
       padding: EdgeInsets.symmetric(horizontal: t.sp * 0.625),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(t.rControl * 0.5),
+        borderRadius: BorderRadius.circular(t.rInner),
         border: Border.all(color: t.border, width: t.bw),
       ),
       child: Text(

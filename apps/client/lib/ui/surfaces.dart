@@ -304,7 +304,7 @@ Future<T?> showStormPopover<T>({
       barrierColor: const Color(0x00000000),
       barrierDismissible: true,
       barrierLabel: 'Dismiss',
-      transitionDuration: t.duration,
+      transitionDuration: t.durationOf(context),
       pageBuilder: (routeContext, animation, _) => Stack(
         children: [
           Positioned(

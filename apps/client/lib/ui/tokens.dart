@@ -121,9 +121,31 @@ class StormTokens extends ThemeExtension<StormTokens> {
   /// grammar: corners are places, the pill is an action bar.
   final double rControl;
 
+  /// A fully rounded end: pills and dots. Not derived from [rControl].
+  double get rPill => 999;
+
+  /// Small tags and badges.
+  double get rTag => rControl * 0.4;
+
+  /// A square nested inside a control: checkboxes, rail tiles, small wells.
+  double get rInner => rControl * 0.5;
+
+  /// Chips and compact rows.
+  double get rChip => rControl * 0.6;
+
+  /// Tiles sitting just under a full control.
+  double get rTile => rControl * 0.8;
+
   final double bw;
   final double shadowDepth;
   final Duration duration;
+
+  /// [duration], or zero when the platform asks for no animation.
+  Duration durationOf(BuildContext context) =>
+      MediaQuery.disableAnimationsOf(context) ? Duration.zero : duration;
+
+  /// The default easing for every animated transition.
+  Curve get curve => Curves.easeOut;
 
   /// The surface's own OKLCH lightness, and which way "away from the page"
   /// points (+1 dark, -1 light).
@@ -152,6 +174,14 @@ class StormTokens extends ThemeExtension<StormTokens> {
   double get bodySize => fs;
   double get labelSize => math.max(minStep, fs / math.pow(scale, 2).toDouble());
   double get codeSize => fs / scale;
+
+  /// Uppercase mono section and key labels.
+  TextStyle get labelStyle => TextStyle(
+    fontFamily: monoFamily,
+    fontSize: labelSize,
+    letterSpacing: labelSize * 0.08,
+    color: text3,
+  );
 
   /// Page titles (Storm v2): 25 at the default 16 / 1.25.
   double get titleSize => fs * scale * scale;

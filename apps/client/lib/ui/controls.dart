@@ -208,22 +208,22 @@ class StormToggle extends StatelessWidget {
           onTap: live ? () => onChanged!(!value) : null,
           behavior: HitTestBehavior.opaque,
           child: AnimatedContainer(
-            duration: t.duration,
-            curve: Curves.easeOut,
+            duration: t.durationOf(context),
+            curve: t.curve,
             width: t.sp * 4.75,
             height: t.sp * 2.75,
             padding: EdgeInsets.all(t.sp * 0.25 - t.bw),
             decoration: BoxDecoration(
               color: value ? t.accent : t.surface2,
-              borderRadius: BorderRadius.circular(999),
+              borderRadius: BorderRadius.circular(t.rPill),
               border: Border.all(
                 color: value ? t.accent : t.border,
                 width: t.bw,
               ),
             ),
             child: AnimatedAlign(
-              duration: t.duration,
-              curve: Curves.easeOut,
+              duration: t.durationOf(context),
+              curve: t.curve,
               alignment: value ? Alignment.centerRight : Alignment.centerLeft,
               child: Container(
                 width: t.sp * 2,
@@ -577,8 +577,8 @@ class _ChoiceCardState extends State<_ChoiceCard> {
                 clipBehavior: Clip.none,
                 children: [
                   AnimatedContainer(
-                    duration: t.duration,
-                    curve: Curves.easeOut,
+                    duration: t.durationOf(context),
+                    curve: t.curve,
                     padding: EdgeInsets.all(t.sp * 1.5),
                     decoration: BoxDecoration(
                       color: fill,

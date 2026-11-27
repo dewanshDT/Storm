@@ -161,7 +161,7 @@ class _Bar extends StatelessWidget {
         height: height,
         decoration: BoxDecoration(
           color: t.surface2,
-          borderRadius: BorderRadius.circular(t.rControl * 0.4),
+          borderRadius: BorderRadius.circular(t.rTag),
         ),
       ),
     );
@@ -303,7 +303,7 @@ class ConflictCard extends StatelessWidget {
             ),
             decoration: BoxDecoration(
               color: t.surface2,
-              borderRadius: BorderRadius.circular(t.rControl * 0.6),
+              borderRadius: BorderRadius.circular(t.rChip),
             ),
             child: Text(
               '<<<<<<< yours',

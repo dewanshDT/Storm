@@ -18,6 +18,24 @@ StormTokens tokensFor(Brightness b) => StormTokens.from(
 );
 
 void main() {
+  testWidgets('durationOf honours disableAnimations', (tester) async {
+    final t = tokensFor(Brightness.dark);
+    late Duration normal, off;
+    Widget probe(bool disable, void Function(Duration) out) => MediaQuery(
+      data: MediaQueryData(disableAnimations: disable),
+      child: Builder(
+        builder: (context) {
+          out(t.durationOf(context));
+          return const SizedBox();
+        },
+      ),
+    );
+    await tester.pumpWidget(probe(false, (d) => normal = d));
+    await tester.pumpWidget(probe(true, (d) => off = d));
+    expect(normal, t.duration);
+    expect(off, Duration.zero);
+  });
+
   group('OKLCH conversion', () {
     // Every colour in the app flows through this, so it is checked against
     // known values rather than eyeballed. References computed with the Oklab

@@ -112,7 +112,7 @@ class StatusPill extends StatelessWidget {
         vertical: t.sp * 0.25,
       ),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(t.rPill),
         border: Border.all(color: t.border, width: t.bw),
       ),
       child: Row(

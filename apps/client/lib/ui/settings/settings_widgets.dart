@@ -139,15 +139,7 @@ class GroupLabel extends StatelessWidget {
     final t = context.tokens;
     return Padding(
       padding: EdgeInsets.only(top: top, bottom: bottom ?? t.sp * 0.5),
-      child: Text(
-        text.toUpperCase(),
-        style: TextStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize,
-          letterSpacing: t.labelSize * 0.08,
-          color: t.text3,
-        ),
-      ),
+      child: Text(text.toUpperCase(), style: t.labelStyle),
     );
   }
 }
@@ -199,7 +191,7 @@ class TextAction extends StatelessWidget {
       excludeSemantics: true,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl * 0.6),
+        borderRadius: BorderRadius.circular(t.rChip),
         child: Padding(
           padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
           child: Text(
