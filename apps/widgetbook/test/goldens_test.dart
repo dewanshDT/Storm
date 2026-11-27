@@ -127,10 +127,12 @@ void _ignoreOverflow() {
 String _fileName(String path) =>
     path.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_').toLowerCase();
 
+// The index lists file:line sites in the client, so its image would change
+// with every client edit; the smoke test still renders it.
 List<WidgetbookNode> _components(List<WidgetbookNode> nodes) => [
   for (final node in nodes)
     if (node is WidgetbookComponent)
       node
-    else if (node.children != null)
+    else if (node.children != null && node.name != 'Index')
       ..._components(node.children!),
 ];
