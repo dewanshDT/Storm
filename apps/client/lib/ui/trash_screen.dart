@@ -583,16 +583,14 @@ class _SelectionBar extends StatelessWidget {
         clear,
       ],
     );
-    return Container(
+    return Padding(
       key: const Key('trash-selection'),
-      margin: EdgeInsets.only(bottom: t.sp * 1.5),
-      padding: EdgeInsets.only(bottom: t.sp * 1.25),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: t.border, width: t.bw),
-        ),
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: Hairline(
+        bottom: true,
+        padding: EdgeInsets.only(bottom: t.sp * 1.25),
+        child: row,
       ),
-      child: row,
     );
   }
 }
