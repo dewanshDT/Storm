@@ -21,6 +21,7 @@ ISOLATION := apps/runtime/isolation
 # not a workspace joining them (R6) — its own small crate, its own target.
 DIAG := crates/storm-diag
 CLIENT := apps/client
+WIDGETBOOK := apps/widgetbook
 WWW    := apps/www
 
 # Overridable: make server VAULT_ROOT=~/my-vaults
@@ -84,6 +85,7 @@ fmt-check:
 	cd $(ISOLATION) && cargo fmt --check
 	cd $(DIAG) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
+	cd $(WIDGETBOOK) && dart format --set-exit-if-changed lib test
 
 ## lint: clippy + dart analyze, all must be clean
 lint:
@@ -94,9 +96,10 @@ lint:
 	cd $(ISOLATION) && cargo clippy --all-targets -- -D warnings
 	cd $(DIAG) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
+	cd $(WIDGETBOOK) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-relay-cf test-feedback-cf test-runtime test-diag test-client test-feedback-sync
+test: test-server test-relay test-relay-cf test-feedback-cf test-runtime test-diag test-client test-widgetbook test-feedback-sync
 
 ## test-server: Rust unit tests
 test-server:
@@ -187,6 +190,16 @@ verify-isolation-units:
 ## test-client: Dart unit tests
 test-client:
 	cd $(CLIENT) && flutter test
+
+## test-widgetbook: the catalogue's smoke tests, and its generated directory is up to date
+#
+# `lib/main.directories.g.dart` is committed so nothing else needs build_runner;
+# regenerating it here and checking the diff is what keeps it honest.
+test-widgetbook: widgetbook-codegen
+	@git diff --exit-code -- $(WIDGETBOOK)/lib/main.directories.g.dart || { \
+		echo "$(WIDGETBOOK)/lib/main.directories.g.dart is stale; commit the regenerated file" >&2; \
+		exit 1; }
+	cd $(WIDGETBOOK) && flutter test
 
 ## test-gateway-mutations: rebuild the bridge broken three ways; gateway_e2e.py must catch each
 test-gateway-mutations:
@@ -425,6 +438,7 @@ fmt:
 	cd $(ISOLATION) && cargo fmt
 	cd $(DIAG) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
+	cd $(WIDGETBOOK) && dart format lib test
 
 # ---- running --------------------------------------------------------
 
@@ -590,6 +604,18 @@ deploy-check:
 codegen:
 	cd $(CLIENT) && dart run build_runner build
 
+## widgetbook: run the component catalogue on this machine (decision 164)
+widgetbook:
+	cd $(WIDGETBOOK) && flutter run -d $(if $(filter Darwin,$(shell uname -s)),macos,linux)
+
+## widgetbook-web: build the component catalogue for the web (apps/widgetbook/build/web)
+widgetbook-web:
+	cd $(WIDGETBOOK) && flutter build web --release
+
+## widgetbook-codegen: regenerate the catalogue's directory from its @UseCase functions
+widgetbook-codegen:
+	cd $(WIDGETBOOK) && dart run build_runner build
+
 ## www: build the marketing site (apps/www → dist)
 www:
 	cd $(WWW) && npm ci && npm run build
@@ -642,7 +668,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-widgetbook widgetbook widgetbook-web widgetbook-codegen test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check test-release-channel test-apt-repo-build \
         build-server deploy deploy-check

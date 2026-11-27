@@ -31,6 +31,7 @@ jobs:
       diag: ${{ steps.f.outputs.diag }}
       installer: ${{ steps.f.outputs.installer }}
       client: ${{ steps.f.outputs.client }}
+      widgetbook: ${{ steps.f.outputs.widgetbook }}
       live: ${{ steps.f.outputs.live }}
       www: ${{ steps.f.outputs.www }}
       release_channel: ${{ steps.f.outputs.release_channel }}
@@ -108,6 +109,10 @@ jobs:
             client:
               - *vectors
               - apps/client/**
+            # Decision 164: the catalogue imports the client's lib/ui by path.
+            widgetbook:
+              - apps/client/**
+              - apps/widgetbook/**
             # make test-live and test-browser build the server, relay and
             # runtime and run the server's e2e suites against them.
             live:
@@ -519,6 +524,33 @@ jobs:
           restore-keys: client-sqlite3-${{ runner.os }}-
       - run: flutter pub get
       - run: dart format --set-exit-if-changed lib test test_live
+      - run: flutter analyze
+      - run: flutter test
+
+  # Decision 164: the component catalogue. Its `directories` file is committed,
+  # so there is no build_runner step here; `make test-widgetbook` checks it.
+  widgetbook:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.widgetbook == 'true'
+    name: widgetbook (flutter)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/widgetbook
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - uses: actions/cache@v4
+        with:
+          path: apps/widgetbook/.dart_tool/hooks_runner/shared/sqlite3
+          key: widgetbook-sqlite3-${{ runner.os }}-${{ hashFiles('apps/widgetbook/pubspec.lock') }}
+          restore-keys: widgetbook-sqlite3-${{ runner.os }}-
+      - run: flutter pub get
+      - run: dart format --set-exit-if-changed lib test
       - run: flutter analyze
       - run: flutter test
 
