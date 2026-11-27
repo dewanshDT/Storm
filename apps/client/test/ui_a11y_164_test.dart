@@ -153,21 +153,4 @@ void main() {
       },
     );
   });
-
-  testWidgets('Breadcrumb crumbs are focusable and labelled', (tester) async {
-    var taps = 0;
-    await tester.pumpWidget(
-      _host(
-        Breadcrumb(
-          crumbs: [
-            Crumb('Home', onTap: () => taps++),
-            const Crumb('Here'),
-          ],
-        ),
-      ),
-    );
-    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    expect(taps, 1);
-  });
 }

@@ -44,3 +44,14 @@ Widget keyValueListLong(BuildContext context) => _list(const [
         'and_must_be_handled_by_the_layout',
   ),
 ]);
+
+@widgetbook.UseCase(name: 'widget values', type: KeyValueList, path: _path)
+Widget keyValueListWidgets(BuildContext context) => Padding(
+  padding: const EdgeInsets.all(16),
+  child: KeyValueList.widgets(
+    bodies: [
+      ('Crew', const Text('Not in a crew')),
+      ('Role', const Text('Reads Storm')),
+    ],
+  ),
+);

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
+import '../ui/panels.dart' show KeyValueList;
 import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
@@ -214,82 +215,64 @@ class _AboutCrewRoleState extends ConsumerState<AboutCrewRole> {
       color: t.text,
     );
 
-    Widget row(String key, Widget body) => Padding(
+    return Padding(
       padding: EdgeInsets.only(top: t.sp * 1.75),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            key.toUpperCase(),
-            style: TextStyle(
-              fontFamily: StormTokens.monoFamily,
-              fontSize: t.labelSize,
-              letterSpacing: t.labelSize * 0.08,
-              color: t.text3,
+      child: KeyValueList.widgets(
+        bodies: [
+          // A server before decision 138 has no crews to move between.
+          if (crews != null)
+            (
+              'Crew',
+              Column(
+                key: const Key('about-crew'),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(crew?.name ?? 'Not in a crew', style: value),
+                  // 145i: a child is in its root's crew and goes with it.
+                  if (_s.spawn.isChild)
+                    Padding(
+                      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+                      child: Text(
+                        kMovesWithParent,
+                        key: const Key('crew-moves-with-parent'),
+                        style: value.copyWith(
+                          fontSize: t.codeSize,
+                          color: t.text3,
+                        ),
+                      ),
+                    )
+                  else
+                    _AboutAction(
+                      key: const Key('move-to-crew'),
+                      anchor: _crewAnchor,
+                      label: 'Move to crew',
+                      onTap: () => _move(crews),
+                    ),
+                ],
+              ),
             ),
-          ),
-          SizedBox(height: t.sp * 0.375),
-          body,
-        ],
-      ),
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // A server before decision 138 has no crews to move between.
-        if (crews != null)
-          row(
-            'Crew',
+          (
+            'Role',
             Column(
-              key: const Key('about-crew'),
+              key: const Key('about-role'),
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(crew?.name ?? 'Not in a crew', style: value),
-                // 145i: a child is in its root's crew and goes with it.
-                if (_s.spawn.isChild)
-                  Padding(
-                    padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
-                    child: Text(
-                      kMovesWithParent,
-                      key: const Key('crew-moves-with-parent'),
-                      style: value.copyWith(
-                        fontSize: t.codeSize,
-                        color: t.text3,
-                      ),
-                    ),
-                  )
-                else
-                  _AboutAction(
-                    key: const Key('move-to-crew'),
-                    anchor: _crewAnchor,
-                    label: 'Move to crew',
-                    onTap: () => _move(crews),
-                  ),
+                Text(
+                  aboutRoleText(_s, readsStorm: sessionReadsStorm(o, _s)),
+                  key: const Key('about-role-text'),
+                  style: value,
+                ),
+                _AboutAction(
+                  key: const Key('change-label'),
+                  anchor: _roleAnchor,
+                  label: 'Change label',
+                  onTap: _relabel,
+                ),
               ],
             ),
           ),
-        row(
-          'Role',
-          Column(
-            key: const Key('about-role'),
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                aboutRoleText(_s, readsStorm: sessionReadsStorm(o, _s)),
-                key: const Key('about-role-text'),
-                style: value,
-              ),
-              _AboutAction(
-                key: const Key('change-label'),
-                anchor: _roleAnchor,
-                label: 'Change label',
-                onTap: _relabel,
-              ),
-            ],
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

@@ -11,35 +11,51 @@ export 'tags.dart' show MonoTag;
 
 /// Mono uppercase keys over `text` values (the session's About).
 class KeyValueList extends StatelessWidget {
-  const KeyValueList({super.key, required this.rows});
+  const KeyValueList({super.key, required List<(String, String)> this.rows})
+    : bodies = null;
 
-  final List<(String, String)> rows;
+  /// Rows whose value is a widget, for a value that carries an action.
+  const KeyValueList.widgets({
+    super.key,
+    required List<(String, Widget)> this.bodies,
+  }) : rows = null;
+
+  final List<(String, String)>? rows;
+  final List<(String, Widget)>? bodies;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final entries = <(String, Widget)>[
+      for (final r in rows ?? const <(String, String)>[])
+        (
+          r.$1,
+          Text(
+            r.$2,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.uiSize,
+              height: 1.45,
+              color: t.text,
+            ),
+          ),
+        ),
+      ...?bodies,
+    ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (var i = 0; i < rows.length; i++)
+        for (var i = 0; i < entries.length; i++)
           Padding(
             padding: EdgeInsets.only(
-              bottom: i == rows.length - 1 ? 0 : t.sp * 1.75,
+              bottom: i == entries.length - 1 ? 0 : t.sp * 1.75,
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(rows[i].$1.toUpperCase(), style: t.labelStyle),
+                Text(entries[i].$1.toUpperCase(), style: t.labelStyle),
                 SizedBox(height: t.sp * 0.375),
-                Text(
-                  rows[i].$2,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.uiSize,
-                    height: 1.45,
-                    color: t.text,
-                  ),
-                ),
+                entries[i].$2,
               ],
             ),
           ),

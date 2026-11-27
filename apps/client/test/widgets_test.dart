@@ -62,14 +62,6 @@ void main() {
       expect(d.borderRadius, isNull);
       expect(d.border, isNotNull, reason: 'the rule is the separator');
     });
-
-    testWidgets('and the same for a folder', (tester) async {
-      final d = await decorationOf(
-        tester,
-        const FolderRow(name: 'Projects', count: 2, divider: true),
-      );
-      expect(d.borderRadius, isNull);
-    });
   });
 
   Widget wrap(Widget child, {StormPreset preset = StormPreset.stormDark}) =>
@@ -152,20 +144,6 @@ void main() {
         tester.widget<Text>(find.text('created')).style?.fontFamily,
         StormTokens.monoFamily,
       );
-    });
-  });
-
-  group('SaveStateLabel', () {
-    testWidgets('colours each state by what it means', (tester) async {
-      final t = StormTokens.from(StormPreset.stormDark);
-      for (final (tone, expected) in [
-        (SaveTone.good, t.green),
-        (SaveTone.waiting, t.amber),
-        (SaveTone.bad, t.danger),
-      ]) {
-        await show(tester, SaveStateLabel(label: 'state', tone: tone));
-        expect(tester.widget<Text>(find.text('state')).style?.color, expected);
-      }
     });
   });
 

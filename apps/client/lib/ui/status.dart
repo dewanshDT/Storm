@@ -100,34 +100,5 @@ DotStatus dotStatusFor({
   return DotStatus.synced;
 }
 
-/// Where a note is in its save cycle.
-///
-/// Mono and colour-coded, because it is read at a glance and never actually
-/// *read*: green means the server has it, amber means it is waiting, danger
-/// means it did not go.
-class SaveStateLabel extends StatelessWidget {
-  const SaveStateLabel({super.key, required this.label, required this.tone});
-
-  final String label;
-  final SaveTone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Text(
-      label,
-      style: TextStyle(
-        fontFamily: StormTokens.monoFamily,
-        fontSize: t.labelSize,
-        color: switch (tone) {
-          SaveTone.good => t.green,
-          SaveTone.working => t.text3,
-          SaveTone.waiting => t.amber,
-          SaveTone.bad => t.danger,
-        },
-      ),
-    );
-  }
-}
-
+/// Where a note is in its save cycle, as `VersionLine` colours it.
 enum SaveTone { good, working, waiting, bad }
