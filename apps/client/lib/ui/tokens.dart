@@ -144,6 +144,13 @@ class StormTokens extends ThemeExtension<StormTokens> {
   Duration durationOf(BuildContext context) =>
       MediaQuery.disableAnimationsOf(context) ? Duration.zero : duration;
 
+  /// [ms] milliseconds, or zero when the platform asks for no animation, for
+  /// a motion whose length is not the standard [duration].
+  Duration motion(BuildContext context, int ms) =>
+      MediaQuery.disableAnimationsOf(context)
+      ? Duration.zero
+      : Duration(milliseconds: ms);
+
   /// The default easing for every animated transition.
   Curve get curve => Curves.easeOut;
 

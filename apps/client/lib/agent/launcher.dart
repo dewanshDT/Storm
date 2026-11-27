@@ -487,7 +487,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       if (at == null || !at.mounted) return;
       Scrollable.ensureVisible(
         at,
-        duration: context.tokens.duration,
+        duration: context.tokens.durationOf(context),
         alignment: 0.2,
       );
     });
@@ -1266,7 +1266,7 @@ Future<AgentSession?> showNewSessionLauncher(
     barrierDismissible: true,
     barrierLabel: 'Close',
     barrierColor: const Color(0x66000000),
-    transitionDuration: t.duration,
+    transitionDuration: t.durationOf(context),
     pageBuilder: (dialog, _, _) => Align(
       alignment: Alignment.topCenter,
       child: Padding(

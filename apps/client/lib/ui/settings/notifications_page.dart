@@ -1097,7 +1097,7 @@ class _ThisDeviceMobileSection extends ConsumerWidget {
       unawaited(
         Scrollable.ensureVisible(
           target,
-          duration: const Duration(milliseconds: 300),
+          duration: context.tokens.motion(context, 300),
         ),
       );
     }
@@ -1385,7 +1385,7 @@ class _ThisDeviceAndroidSectionState
       unawaited(
         Scrollable.ensureVisible(
           target,
-          duration: const Duration(milliseconds: 300),
+          duration: context.tokens.motion(context, 300),
         ),
       );
     }

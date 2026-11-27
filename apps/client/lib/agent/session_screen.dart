@@ -930,8 +930,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             // is, so a focused terminal with the keyboard down keeps the room.
             if (!s.ended && c != null)
               AnimatedSize(
-                duration: t.duration,
-                curve: Curves.easeOut,
+                duration: t.durationOf(context),
+                curve: t.curve,
                 alignment: Alignment.topCenter,
                 child: keyboard
                     ? _ExtraKeys(terminal: c.terminal, onDone: _focus.unfocus)

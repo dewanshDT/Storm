@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -35,6 +36,53 @@ void main() {
     expect(normal, t.duration);
     expect(off, Duration.zero);
   });
+
+  for (final (disable, settled) in [(true, true), (false, false)]) {
+    testWidgets(
+      'a motion(300) scroll ${disable ? 'lands in one frame' : 'animates'} '
+      'with disableAnimations: $disable',
+      (tester) async {
+        final t = tokensFor(Brightness.dark);
+        final target = GlobalKey();
+        late BuildContext inner;
+        await tester.pumpWidget(
+          MediaQuery(
+            data: MediaQueryData(disableAnimations: disable),
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    const SizedBox(height: 3000),
+                    Builder(
+                      builder: (context) {
+                        inner = context;
+                        return SizedBox(key: target, height: 50);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        unawaited(
+          Scrollable.ensureVisible(
+            target.currentContext!,
+            duration: t.motion(inner, 300),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 16));
+        final pos = tester
+            .state<ScrollableState>(find.byType(Scrollable))
+            .position;
+        expect(pos.pixels > 2000, settled);
+        await tester.pumpAndSettle();
+      },
+    );
+  }
 
   group('OKLCH conversion', () {
     // Every colour in the app flows through this, so it is checked against

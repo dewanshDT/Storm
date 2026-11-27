@@ -132,7 +132,7 @@ class _VaultHeaderState extends ConsumerState<VaultHeader> {
             ),
             AnimatedRotation(
               turns: _open ? 0.5 : 0,
-              duration: t.duration,
+              duration: t.durationOf(context),
               child: Icon(
                 LucideIcons.chevron_down,
                 size: t.codeSize,

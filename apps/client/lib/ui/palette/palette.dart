@@ -65,8 +65,8 @@ Future<void> openPalette(
       ? _dialogRoute(context, palette)
       : PageRouteBuilder<PaletteChoice>(
           fullscreenDialog: true,
-          transitionDuration: context.tokens.duration,
-          reverseTransitionDuration: context.tokens.duration,
+          transitionDuration: context.tokens.durationOf(context),
+          reverseTransitionDuration: context.tokens.durationOf(context),
           pageBuilder: (_, _, _) => palette,
           transitionsBuilder: (_, animation, _, child) =>
               FadeTransition(opacity: animation, child: child),
@@ -103,7 +103,7 @@ Route<PaletteChoice> _dialogRoute(BuildContext context, Widget palette) {
     barrierDismissible: true,
     barrierLabel: 'Close',
     barrierColor: Theme.of(context).colorScheme.scrim.withValues(alpha: 0.4),
-    transitionDuration: t.duration,
+    transitionDuration: t.durationOf(context),
     pageBuilder: (dialog, _, _) {
       final size = MediaQuery.sizeOf(dialog);
       final top = math.min(t.sp * 12, size.height * 0.12);

@@ -404,7 +404,7 @@ class _StartsAgentsAboutState extends ConsumerState<StartsAgentsAbout> {
       if (at == null || !at.mounted) return;
       Scrollable.ensureVisible(
         at,
-        duration: const Duration(milliseconds: 200),
+        duration: context.tokens.motion(context, 200),
         alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
       );
     });
