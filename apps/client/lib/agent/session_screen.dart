@@ -1381,21 +1381,22 @@ class _WroteList extends ConsumerWidget {
         ),
       );
     }
-    return ListView(
+    return ListView.builder(
       padding: padding,
-      children: [
-        for (final w in list)
-          WroteRow(
-            key: Key('wrote-${w.noteId ?? w.path}'),
-            title: _wroteTitle(w),
-            crumb: noteCrumb(
-              vaults.where((v) => v.id == w.vaultId).firstOrNull?.name ?? '',
-              w.path,
-            ),
-            meta: _wroteMeta(w),
-            onTap: w.note == null ? null : () => onOpen(w.note!),
+      itemCount: list.length,
+      itemBuilder: (context, i) {
+        final w = list[i];
+        return WroteRow(
+          key: Key('wrote-${w.noteId ?? w.path}'),
+          title: _wroteTitle(w),
+          crumb: noteCrumb(
+            vaults.where((v) => v.id == w.vaultId).firstOrNull?.name ?? '',
+            w.path,
           ),
-      ],
+          meta: _wroteMeta(w),
+          onTap: w.note == null ? null : () => onOpen(w.note!),
+        );
+      },
     );
   }
 }

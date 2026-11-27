@@ -228,97 +228,85 @@ class _TrashViewState extends ConsumerState<TrashView> {
             onClear: _clear,
           );
 
-    final body = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                vault == null ? 'Trash' : 'Trash · ${vault.name}',
-                key: const Key('trash-title'),
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.titleSize,
-                  fontWeight: FontWeight.w600,
-                  color: t.text,
-                ),
+    final head = <Widget>[
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              vault == null ? 'Trash' : 'Trash · ${vault.name}',
+              key: const Key('trash-title'),
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.titleSize,
+                fontWeight: FontWeight.w600,
+                color: t.text,
               ),
             ),
-            StormButton.outline(
-              key: const Key('trash-empty'),
-              label: 'Empty trash',
-              icon: LucideIcons.trash_2,
-              onPressed: items.isEmpty ? null : _askEmpty,
+          ),
+          StormButton.outline(
+            key: const Key('trash-empty'),
+            label: 'Empty trash',
+            icon: LucideIcons.trash_2,
+            onPressed: items.isEmpty ? null : _askEmpty,
+          ),
+        ],
+      ),
+      Padding(
+        padding: EdgeInsets.only(top: t.sp, bottom: t.sp * 2.5),
+        child: Wrap(
+          spacing: t.sp * 0.75,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              keep.intro,
+              key: const Key('trash-intro'),
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.uiSize,
+                color: t.text2,
+                height: 1.5,
+              ),
+            ),
+            TextAction(
+              key: const Key('trash-retention-link'),
+              label: 'Change in Settings › Vaults ›',
+              accent: true,
+              large: true,
+              onTap: () =>
+                  GoRouter.of(context).go(Routes.settingsPage('vaults')),
             ),
           ],
         ),
-        Padding(
-          padding: EdgeInsets.only(top: t.sp, bottom: t.sp * 2.5),
-          child: Wrap(
-            spacing: t.sp * 0.75,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                keep.intro,
-                key: const Key('trash-intro'),
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.uiSize,
-                  color: t.text2,
-                  height: 1.5,
-                ),
-              ),
-              TextAction(
-                key: const Key('trash-retention-link'),
-                label: 'Change in Settings › Vaults ›',
-                accent: true,
-                large: true,
-                onTap: () =>
-                    GoRouter.of(context).go(Routes.settingsPage('vaults')),
-              ),
-            ],
-          ),
-        ),
-        if (wide && selectionBar != null) selectionBar,
-        page.when(
-          loading: () => const SkeletonRows(),
-          error: (e, _) => EmptyState(
-            icon: LucideIcons.cloud_off,
-            title: 'Could not load the trash',
-            detail: describeFailure(e),
-            action: 'Try again',
-            onAction: () => ref.invalidate(trashProvider(vaultId)),
-          ),
-          data: (p) => p.items.isEmpty
-              ? const EmptyState(
-                  icon: LucideIcons.trash_2,
-                  title: 'Trash is empty',
-                  detail:
-                      'Deleted notes and folders wait here before they are '
-                      'removed for good.',
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  spacing: t.sp,
-                  children: [
-                    for (final item in p.items)
-                      _TrashCard(
-                        key: Key('trash:${item.id}'),
-                        item: item,
-                        keep: keep,
-                        selected: _selected.contains(item.id),
-                        selecting: wide || picked.isNotEmpty,
-                        onToggle: () => _toggle(item),
-                        onRestore: _busy ? null : () => _restoreAll([item]),
-                      ),
-                  ],
-                ),
-        ),
-      ],
+      ),
+      if (wide && selectionBar != null) selectionBar,
+    ];
+    final cards = <TrashItem>[];
+    final tail = page.when(
+      loading: () => const SkeletonRows(),
+      error: (e, _) => EmptyState(
+        icon: LucideIcons.cloud_off,
+        title: 'Could not load the trash',
+        detail: describeFailure(e),
+        action: 'Try again',
+        onAction: () => ref.invalidate(trashProvider(vaultId)),
+      ),
+      data: (p) {
+        if (p.items.isEmpty) {
+          return const EmptyState(
+            icon: LucideIcons.trash_2,
+            title: 'Trash is empty',
+            detail:
+                'Deleted notes and folders wait here before they are '
+                'removed for good.',
+          );
+        }
+        cards.addAll(p.items);
+        return null;
+      },
     );
+    if (tail != null) head.add(tail);
 
-    final list = ListView(
+    final list = ListView.builder(
       padding: EdgeInsets.fromLTRB(
         wide ? t.sp * 5 : StormChrome.contentInset(context),
         wide ? pageTopInset(t) : t.sp * 2,
@@ -327,7 +315,24 @@ class _TrashViewState extends ConsumerState<TrashView> {
             ? t.sp * 3
             : StormChrome.navClearance(context),
       ),
-      children: [body],
+      itemCount: head.length + cards.length,
+      itemBuilder: (context, i) {
+        if (i < head.length) return head[i];
+        final n = i - head.length;
+        final item = cards[n];
+        return Padding(
+          padding: EdgeInsets.only(top: n == 0 ? 0 : t.sp),
+          child: _TrashCard(
+            key: Key('trash:${item.id}'),
+            item: item,
+            keep: keep,
+            selected: _selected.contains(item.id),
+            selecting: wide || picked.isNotEmpty,
+            onToggle: () => _toggle(item),
+            onRestore: _busy ? null : () => _restoreAll([item]),
+          ),
+        );
+      },
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

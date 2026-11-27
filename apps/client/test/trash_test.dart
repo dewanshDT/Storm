@@ -193,6 +193,26 @@ void main() {
       expect(find.byKey(const Key('restore:t1')), findsOneWidget);
     });
 
+    testWidgets('a long trash builds only the rows on screen', (tester) async {
+      items = [
+        for (var i = 0; i < 500; i++) item('n$i', 'note', 'Note $i', 'N$i.md'),
+      ];
+      await pumpTrash(tester, size: desk);
+      final built = find
+          .byWidgetPredicate((w) => w.key.toString().startsWith("[<'trash:n"))
+          .evaluate()
+          .length;
+      expect(find.byKey(const Key('trash:n0')), findsOneWidget);
+      expect(find.byKey(const Key('trash:n499')), findsNothing);
+      expect(find.byKey(const Key('trash:n60')), findsNothing);
+      expect(built, lessThan(40));
+      for (var i = 0; i < 40; i++) {
+        await tester.fling(find.byType(ListView), const Offset(0, -3000), 8000);
+        await tester.pumpAndSettle();
+      }
+      expect(find.byKey(const Key('trash:n499')), findsOneWidget);
+    });
+
     testWidgets('kept until emptied: no countdown', (tester) async {
       retention = null;
       await pumpTrash(tester, size: desk);
@@ -504,7 +524,10 @@ void main() {
         await tester.scrollUntilVisible(
           entry,
           200,
-          scrollable: find.byType(Scrollable).first,
+          scrollable: find.descendant(
+            of: find.byType(ListView),
+            matching: find.byType(Scrollable),
+          ),
         );
         await tester.tap(entry);
         await tester.pumpAndSettle();

@@ -104,41 +104,49 @@ class BrowseScreen extends ConsumerWidget {
         ),
         data: (list) {
           final entries = _childrenOf(list, folder, known);
-          return ListView(
+          final rows = <Widget>[
+            ...head,
+            if (entries.isEmpty)
+              EmptyState(
+                icon: LucideIcons.folder_open,
+                title: 'Nothing in this folder',
+                detail: folder.isEmpty
+                    ? 'New notes will land at the top of this vault.'
+                    : 'New notes made here will land in ${parts.last}.',
+                action: 'New note',
+                onAction: () => NewNoteRequest.of(context)?.call(),
+              ),
+          ];
+          final tail = [
+            // The phone has no sidebar; the vault root carries the Trash.
+            if (parts.isEmpty && !context.isExpanded)
+              TrashRow(vaultId: vaultId),
+          ];
+          final count = rows.length + entries.length + tail.length;
+          return ListView.builder(
             padding: EdgeInsets.fromLTRB(
               StormChrome.contentInset(context),
               0,
               StormChrome.contentInset(context),
               StormChrome.navClearance(context),
             ),
-            children: [
-              ...head,
-              if (entries.isEmpty)
-                EmptyState(
-                  icon: LucideIcons.folder_open,
-                  title: 'Nothing in this folder',
-                  detail: folder.isEmpty
-                      ? 'New notes will land at the top of this vault.'
-                      : 'New notes made here will land in ${parts.last}.',
-                  action: 'New note',
-                  onAction: () => NewNoteRequest.of(context)?.call(),
-                )
-              else
-                for (final entry in entries)
-                  EntryTile(
-                    entry: entry,
-                    unseen: entry.isFolder
-                        ? list.any(
-                            (n) =>
-                                n.path.startsWith('${entry.path}/') &&
-                                unseen.contains(n.id),
-                          )
-                        : unseen.contains(entry.note!.id),
-                  ),
-              // The phone has no sidebar; the vault root carries the Trash.
-              if (parts.isEmpty && !context.isExpanded)
-                TrashRow(vaultId: vaultId),
-            ],
+            itemCount: count,
+            itemBuilder: (context, i) {
+              if (i < rows.length) return rows[i];
+              final n = i - rows.length;
+              if (n >= entries.length) return tail[n - entries.length];
+              final entry = entries[n];
+              return EntryTile(
+                entry: entry,
+                unseen: entry.isFolder
+                    ? list.any(
+                        (e) =>
+                            e.path.startsWith('${entry.path}/') &&
+                            unseen.contains(e.id),
+                      )
+                    : unseen.contains(entry.note!.id),
+              );
+            },
           );
         },
       ),
