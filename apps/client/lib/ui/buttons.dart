@@ -17,6 +17,7 @@ class StormButton extends StatelessWidget {
     this.icon,
     this.expand = false,
     this.color,
+    this.density = StormDensity.regular,
   });
 
   const StormButton.primary({
@@ -101,6 +102,10 @@ class StormButton extends StatelessWidget {
   /// ink for the others.
   final Color? color;
 
+  /// `comfortable` is a full-width touch target: `1.5 sp` down and the UI
+  /// font. `compact` is as `regular`.
+  final StormDensity density;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
@@ -112,7 +117,7 @@ class StormButton extends StatelessWidget {
       StormButtonKind.text => (null, color ?? t.text2, null),
       StormButtonKind.dangerText => (null, color ?? t.danger, null),
     };
-    final padding = switch (kind) {
+    final base = switch (kind) {
       StormButtonKind.primary || StormButtonKind.danger => EdgeInsets.symmetric(
         horizontal: t.sp * 2,
         vertical: t.sp * 1.125,
@@ -128,6 +133,11 @@ class StormButton extends StatelessWidget {
       StormButtonKind.text || StormButtonKind.dangerText =>
         EdgeInsets.symmetric(horizontal: t.sp * 0.5, vertical: t.sp * 0.5),
     };
+    final padding = density == StormDensity.comfortable
+        ? base
+              .resolve(TextDirection.ltr)
+              .copyWith(top: t.sp * 1.5, bottom: t.sp * 1.5)
+        : base;
     final weight =
         kind == StormButtonKind.outline ||
             kind == StormButtonKind.text ||
@@ -170,7 +180,9 @@ class StormButton extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontFamily: StormTokens.sansFamily,
-                        fontSize: t.codeSize,
+                        fontSize: density == StormDensity.comfortable
+                            ? t.uiSize
+                            : t.codeSize,
                         fontWeight: weight,
                         color: ink,
                       ),

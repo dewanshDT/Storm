@@ -262,6 +262,11 @@ final directories = <_widgetbook.WidgetbookNode>[
         name: 'StormButton',
         useCases: [
           _widgetbook.WidgetbookUseCase(
+            name: 'comfortable',
+            builder:
+                _storm_widgetbook_use_cases_storm_button.stormButtonComfortable,
+          ),
+          _widgetbook.WidgetbookUseCase(
             name: 'danger (error)',
             builder: _storm_widgetbook_use_cases_storm_button.stormButtonDanger,
           ),

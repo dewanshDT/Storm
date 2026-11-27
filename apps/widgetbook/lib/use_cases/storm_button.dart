@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:storm/ui/controls.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:widgetbook/widgetbook.dart';
 import 'package:widgetbook_annotation/widgetbook_annotation.dart' as widgetbook;
 
@@ -83,6 +84,33 @@ Widget stormButtonLongLabel(BuildContext context) => Padding(
       icon: Icons.cloud_outlined,
       expand: true,
       onPressed: () {},
+    ),
+  ),
+);
+
+@widgetbook.UseCase(name: 'comfortable', type: StormButton, path: _path)
+Widget stormButtonComfortable(BuildContext context) => Padding(
+  padding: const EdgeInsets.all(16),
+  child: SizedBox(
+    width: 280,
+    child: Column(
+      spacing: 12,
+      children: [
+        StormButton(
+          label: 'Resume',
+          expand: true,
+          density: StormDensity.comfortable,
+          onPressed: () {},
+        ),
+        StormButton(
+          label: 'Dismiss',
+          kind: StormButtonKind.outline,
+          color: context.tokens.text2,
+          expand: true,
+          density: StormDensity.comfortable,
+          onPressed: () {},
+        ),
+      ],
     ),
   ),
 );

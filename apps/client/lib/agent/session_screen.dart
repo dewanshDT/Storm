@@ -960,6 +960,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                             key: const Key('resume-session'),
                             label: 'Resume',
                             expand: true,
+                            density: StormDensity.comfortable,
                             onPressed: _resuming ? null : () => _resume(s),
                           ),
                         ),
@@ -974,6 +975,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                               : StormButtonKind.primary,
                           color: _canResume(s) ? t.text2 : null,
                           expand: true,
+                          density: StormDensity.comfortable,
                           onPressed: () => _runAgain(s),
                         ),
                       ),
@@ -985,6 +987,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                           kind: StormButtonKind.outline,
                           color: t.text2,
                           expand: true,
+                          density: StormDensity.comfortable,
                           onPressed: () => _dismiss(s),
                         ),
                       ),
@@ -2035,15 +2038,18 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
                   kind: StormButtonKind.outline,
                   color: t.text2,
                   expand: true,
+                  density: StormDensity.comfortable,
                   onPressed: () => setState(() => _confirm = false),
                 ),
               ),
               SizedBox(width: t.sp),
               Expanded(
-                child: StormButton.danger(
+                child: StormButton(
                   key: const Key('confirm-action'),
                   label: 'End session',
+                  kind: StormButtonKind.danger,
                   expand: true,
+                  density: StormDensity.comfortable,
                   onPressed: _ending
                       ? null
                       : () async {
@@ -2067,6 +2073,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             kind: StormButtonKind.outline,
             color: t.danger,
             expand: true,
+            density: StormDensity.comfortable,
             onPressed: () {
               final o = ref.read(agentOverviewProvider).value;
               final kids =
