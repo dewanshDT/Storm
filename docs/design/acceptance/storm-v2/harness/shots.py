@@ -224,15 +224,15 @@ def catalogue(slug, path):
     string the catalogue's deep link takes; the app and server are not used."""
     return [
         dict(name=f"design-system/{slug}-{mode}", viewport="desktop", settle=2.5,
-             widgetbook=f"?path={path}&preview&theme={{name:Storm%20%C2%B7%20{mode}%20(Storm%20{mode})}}")
+             widgetbook=f"#/?path={path}&preview&theme={{name:Storm%20%C2%B7%20{mode}%20(Storm%20{mode})}}")
         for mode in ("dark", "light")
     ]
 
 
 DESIGN = [
-    *catalogue("button", "Controls/StormButton/default"),
-    *catalogue("choice-cards", "Controls/ChoiceCards/default"),
-    *catalogue("empty-state", "States/EmptyState/default"),
+    *catalogue("button", "controls/stormbutton/default"),
+    *catalogue("choice-cards", "controls/choicecards/default"),
+    *catalogue("empty-state", "states/emptystate/default"),
 ]
 
 SETS = {"current": CURRENT, "v2": V2, "design": DESIGN, "crews": CREWS}
