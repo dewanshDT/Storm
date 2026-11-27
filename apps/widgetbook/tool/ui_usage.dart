@@ -16,9 +16,6 @@ const sharedFiles = [
   'ui/shell/sidebar_rows.dart',
 ];
 
-/// The gallery instantiates every component by design, so it is not usage.
-const excludedFiles = ['ui/gallery_screen.dart'];
-
 enum Kind { inkWell, gestureDetector, boxDecoration }
 
 class Site {
@@ -76,7 +73,7 @@ Usage scan(Directory lib) {
     );
     final sites = <Site>[];
     for (final e in files.entries) {
-      if (e.key == defined[name] || excludedFiles.contains(e.key)) continue;
+      if (e.key == defined[name]) continue;
       final lines = _Lines(e.value);
       for (final m in call.allMatches(e.value)) {
         sites.add(Site(e.key, lines.of(m.start)));
@@ -87,7 +84,7 @@ Usage scan(Directory lib) {
 
   final candidates = <Site>[];
   for (final e in files.entries) {
-    if (sharedFiles.contains(e.key) || excludedFiles.contains(e.key)) continue;
+    if (sharedFiles.contains(e.key)) continue;
     candidates.addAll(_candidates(e.key, e.value));
   }
   return Usage(components, _sorted(candidates));

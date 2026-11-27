@@ -32,7 +32,7 @@ void main() {
     },
   );
 
-  test('skips comments, strings, the gallery and generated files', () {
+  test('skips comments, strings and generated files', () {
     expect(usage.components['Button']!.map((s) => s.file).toSet(), {
       'agent/screen.dart',
     });

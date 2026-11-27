@@ -55,7 +55,7 @@ the one-off candidates, which are the `InkWell`, `GestureDetector` and
 The catalogue's `[Index]` folder renders both: a table of shared components
 with their use counts (zero highlighted) and the candidates grouped by file,
 which is the backlog of hand-rolled controls to move onto shared components.
-The gallery, the defining file and generated files are not counted.
+The defining file and generated files are not counted.
 
 It is a text scan that skips comments and strings, not an analyzer, so a
 component built through a tear-off or a helper is not seen. Run
