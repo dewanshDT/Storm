@@ -176,7 +176,7 @@ void main() {
         ..holdCrewChanges = Completer()
         ..refuseCrewChange = (404, 'no such crew');
       await rightClick(t, header('crw_1'));
-      await t.tap(find.byKey(const Key('crew-swatch-sky')));
+      await t.tap(find.byKey(const Key('accent-swatch-sky')));
       await t.pumpAndSettle();
       expect(c.read(agentOverviewProvider).value!.crews!.first.color, 'sky');
       agents.holdCrewChanges!.complete();

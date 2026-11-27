@@ -140,11 +140,15 @@ class AccentPicker extends StatelessWidget {
     required this.selected,
     required this.onSelected,
     this.size = 30,
+    this.accents = Accent.values,
   });
 
   final Accent selected;
   final ValueChanged<Accent> onSelected;
   final double size;
+
+  /// The choices, in order; every accent by default.
+  final List<Accent> accents;
 
   @override
   Widget build(BuildContext context) {
@@ -152,8 +156,9 @@ class AccentPicker extends StatelessWidget {
       spacing: 8,
       runSpacing: 8,
       children: [
-        for (final accent in Accent.values)
+        for (final accent in accents)
           AccentSwatch(
+            key: ValueKey('accent-swatch-${accent.name}'),
             accent: accent,
             selected: accent == selected,
             size: size,

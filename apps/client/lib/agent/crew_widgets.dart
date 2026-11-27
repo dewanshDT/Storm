@@ -805,39 +805,11 @@ class CrewSwatches extends StatelessWidget {
   final ValueChanged<Accent> onSelected;
 
   @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final side = t.sp * 1.875;
-    return Wrap(
-      spacing: t.sp * 0.625,
-      runSpacing: t.sp * 0.625,
-      children: [
-        for (final a in kCrewPalette)
-          Semantics(
-            button: true,
-            selected: a == selected,
-            label: a.label,
-            excludeSemantics: true,
-            onTap: () => onSelected(a),
-            child: GestureDetector(
-              onTap: () => onSelected(a),
-              child: Container(
-                key: Key('crew-swatch-${a.name}'),
-                width: side,
-                height: side,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: a.tile(t),
-                  border: a == selected
-                      ? Border.all(color: t.accent, width: t.bw * 1.5)
-                      : null,
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => AccentPicker(
+    accents: kCrewPalette,
+    selected: selected,
+    onSelected: onSelected,
+  );
 }
 
 /// The crew whose End all running banner is open (138k), by id.

@@ -305,7 +305,7 @@ void main() {
       );
 
       await rightClick(t, find.byKey(const Key('crew-crw_1')));
-      await t.tap(find.byKey(const Key('crew-swatch-sky')));
+      await t.tap(find.byKey(const Key('accent-swatch-sky')));
       await t.pumpAndSettle();
       expect(agents.crew('crw_1')!['color'], 'sky');
       final patches = [
@@ -561,14 +561,17 @@ void main() {
         final swatches = find.byWidgetPredicate(
           (w) =>
               w.key is ValueKey<String> &&
-              (w.key! as ValueKey<String>).value.startsWith('crew-swatch-'),
+              (w.key! as ValueKey<String>).value.startsWith('accent-swatch-'),
         );
         expect(swatches, findsNWidgets(9), reason: preset.label);
         for (final a in kCrewPalette) {
           final box =
               t
                       .widget<Container>(
-                        find.byKey(Key('crew-swatch-${a.name}')),
+                        find.descendant(
+                          of: find.byKey(Key('accent-swatch-${a.name}')),
+                          matching: find.byType(Container),
+                        ),
                       )
                       .decoration!
                   as BoxDecoration;
