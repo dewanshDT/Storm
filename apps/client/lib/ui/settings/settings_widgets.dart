@@ -172,11 +172,19 @@ class TextAction extends StatelessWidget {
     this.lineHeight,
     this.mono = false,
     this.semanticLabel,
+    this.link = false,
+    this.oneLine = false,
   });
 
   final String label;
   final VoidCallback? onTap;
   final bool accent;
+
+  /// Announced as a link rather than a button.
+  final bool link;
+
+  /// One line, ellipsised, for a label in a bounded slot.
+  final bool oneLine;
   final bool danger;
   final bool large;
   final double? lineHeight;
@@ -197,12 +205,15 @@ class TextAction extends StatelessWidget {
         : t.text2;
     return Tappable(
       semanticLabel: semanticLabel ?? label,
+      link: link,
       onTap: onTap,
       borderRadius: BorderRadius.circular(t.rChip),
       child: Padding(
         padding: EdgeInsets.symmetric(vertical: mono ? 0 : t.sp * 0.25),
         child: Text(
           label,
+          maxLines: oneLine ? 1 : null,
+          overflow: oneLine ? TextOverflow.ellipsis : null,
           style: TextStyle(
             fontFamily: mono ? StormTokens.monoFamily : StormTokens.sansFamily,
             fontSize: mono

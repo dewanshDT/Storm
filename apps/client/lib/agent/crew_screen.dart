@@ -457,19 +457,44 @@ class _Wrote extends ConsumerWidget {
           )
         else
           for (final w in list)
-            _WroteRow(
-              write: w,
-              vault:
-                  vaults
-                      .where((v) => v.id == w.write.vaultId)
-                      .firstOrNull
-                      ?.name ??
+            _wroteRow(
+              context,
+              w,
+              vaults.where((v) => v.id == w.write.vaultId).firstOrNull?.name ??
                   '',
-              by: overview.byId(w.sessionId)?.displayName ?? '',
+              overview.byId(w.sessionId)?.displayName ?? '',
             ),
       ],
     );
   }
+}
+
+Widget _wroteRow(
+  BuildContext context,
+  CrewWrite write,
+  String vault,
+  String by,
+) {
+  final w = write.write;
+  final title = noteTitleOf(w.title, w.path);
+  final at = w.created
+      ? 'new'
+      : w.version != null
+      ? 'v${w.version}'
+      : 'edited';
+  final note = w.note;
+  return WroteRow(
+    key: Key('crew-wrote-${w.noteId ?? w.path}'),
+    title: title.isNotEmpty ? title : (w.path ?? w.kind),
+    crumb: noteCrumb(vault, w.path),
+    meta: '$at · $by',
+    ruled: true,
+    onTap: note == null
+        ? null
+        : () => context.go(
+            Routes.note(note.vaultId, note.noteId, session: write.sessionId),
+          ),
+  );
 }
 
 /// One note a crew member wrote, and which member.
@@ -504,86 +529,6 @@ final crewWritesProvider = FutureProvider.autoDispose
         api.dispose();
       }
     });
-
-class _WroteRow extends StatelessWidget {
-  const _WroteRow({required this.write, required this.vault, required this.by});
-
-  final CrewWrite write;
-  final String vault;
-  final String by;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final w = write.write;
-    final title = noteTitleOf(w.title, w.path);
-    final shown = title.isNotEmpty ? title : (w.path ?? w.kind);
-    final at = w.created
-        ? 'new'
-        : w.version != null
-        ? 'v${w.version}'
-        : 'edited';
-    final meta = '$at · $by';
-    final note = w.note;
-    void open() => context.go(
-      Routes.note(note!.vaultId, note.noteId, session: write.sessionId),
-    );
-    final mono = TextStyle(
-      fontFamily: StormTokens.monoFamily,
-      fontSize: t.labelSize,
-      color: t.text3,
-    );
-    return Semantics(
-      button: note != null,
-      label: '$shown, $meta',
-      excludeSemantics: true,
-      onTap: note == null ? null : open,
-      child: InkWell(
-        key: Key('crew-wrote-${w.noteId ?? w.path}'),
-        hoverColor: t.surface,
-        onTap: note == null ? null : open,
-        child: Container(
-          padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: t.border, width: t.bw),
-            ),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      shown,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.uiSize,
-                        color: t.text,
-                      ),
-                    ),
-                    SizedBox(height: t.sp * 0.25),
-                    Text(
-                      noteCrumb(vault, w.path),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: mono,
-                    ),
-                  ],
-                ),
-              ),
-              SizedBox(width: t.sp),
-              Text(meta, style: mono),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _Quiet extends StatelessWidget {
   const _Quiet(this.text);

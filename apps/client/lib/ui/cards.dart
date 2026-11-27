@@ -20,6 +20,7 @@ class StormCard extends StatelessWidget {
     this.clip = false,
     this.onTap,
     this.onSecondaryTap,
+    this.semanticLabel,
   });
 
   final Widget child;
@@ -43,6 +44,9 @@ class StormCard extends StatelessWidget {
   final bool clip;
   final VoidCallback? onTap;
   final VoidCallback? onSecondaryTap;
+
+  /// What a screen reader says for a tappable card.
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -77,6 +81,7 @@ class StormCard extends StatelessWidget {
       child: Tappable(
         onTap: onTap,
         onSecondaryTap: onSecondaryTap,
+        semanticLabel: semanticLabel,
         borderRadius: r,
         child: Padding(padding: inset, child: child),
       ),

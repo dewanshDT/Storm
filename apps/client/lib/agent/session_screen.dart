@@ -24,6 +24,8 @@ import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
+import '../ui/tags.dart' show OutlineTag;
+import '../ui/tappable.dart';
 import '../ui/decision_strip.dart' show DecisionLayout;
 import '../ui/surfaces.dart' show showStormSheet;
 import '../ui/tokens.dart';
@@ -1118,88 +1120,83 @@ class _PhoneHeader extends ConsumerWidget {
     final s = session;
     final meta = phoneHeaderMeta(s);
     final crew = ref.watch(agentOverviewProvider).value?.crewOf(s);
-    return Semantics(
-      button: true,
-      label: '${s.displayName}, $meta, details',
-      excludeSemantics: true,
+    return Tappable(
+      key: const Key('session-header'),
+      semanticLabel: '${s.displayName}, $meta, details',
       onTap: onTap,
-      child: GestureDetector(
-        key: const Key('session-header'),
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                SessionHeaderDot(session: s, size: t.sp * 0.875),
-                SizedBox(width: t.sp * 0.75),
-                Flexible(
-                  child: Text(
-                    s.displayName,
-                    key: const Key('session-name'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.bodySize * 0.94,
-                      fontWeight: FontWeight.w600,
-                      height: 1.25,
-                      color: t.text,
-                    ),
-                  ),
-                ),
-                SizedBox(width: t.sp * 0.75),
-                Text(
-                  '▾',
+      minHitSize: 0,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SessionHeaderDot(session: s, size: t.sp * 0.875),
+              SizedBox(width: t.sp * 0.75),
+              Flexible(
+                child: Text(
+                  s.displayName,
+                  key: const Key('session-name'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: t.labelSize,
-                    height: 1,
-                    color: t.text3,
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.bodySize * 0.94,
+                    fontWeight: FontWeight.w600,
+                    height: 1.25,
+                    color: t.text,
                   ),
                 ),
-              ],
-            ),
-            SizedBox(height: t.sp * 0.25),
-            // The crew chip and role tag ride the meta line (138-5); each
-            // gives way in proportion when the three don't fit.
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
+              ),
+              SizedBox(width: t.sp * 0.75),
+              Text(
+                '▾',
+                style: TextStyle(
+                  fontSize: t.labelSize,
+                  height: 1,
+                  color: t.text3,
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: t.sp * 0.25),
+          // The crew chip and role tag ride the meta line (138-5); each
+          // gives way in proportion when the three don't fit.
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                flex: 4,
+                child: Text(
+                  meta,
+                  key: const Key('session-meta'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: agentMono(t, size: 11).copyWith(height: 1.3),
+                ),
+              ),
+              if (crew != null) ...[
+                SizedBox(width: t.sp * 0.75),
                 Flexible(
-                  flex: 4,
-                  child: Text(
-                    meta,
-                    key: const Key('session-meta'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: agentMono(t, size: 11).copyWith(height: 1.3),
+                  flex: 3,
+                  child: LayoutBuilder(
+                    key: const Key('phone-crew-chip'),
+                    builder: (context, box) =>
+                        CrewChip(crew: crew, maxWidth: box.maxWidth),
                   ),
                 ),
-                if (crew != null) ...[
-                  SizedBox(width: t.sp * 0.75),
-                  Flexible(
-                    flex: 3,
-                    child: LayoutBuilder(
-                      key: const Key('phone-crew-chip'),
-                      builder: (context, box) =>
-                          CrewChip(crew: crew, maxWidth: box.maxWidth),
-                    ),
-                  ),
-                ],
-                if (s.role case final role?) ...[
-                  SizedBox(width: t.sp * 0.75),
-                  Flexible(
-                    flex: 2,
-                    child: RoleTag(role: role, launchRole: s.launchRole),
-                  ),
-                ],
               ],
-            ),
-          ],
-        ),
+              if (s.role case final role?) ...[
+                SizedBox(width: t.sp * 0.75),
+                Flexible(
+                  flex: 2,
+                  child: RoleTag(role: role, launchRole: s.launchRole),
+                ),
+              ],
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1238,11 +1235,6 @@ class _NotePanel extends ConsumerWidget {
     void open() => context.go(Routes.note(at.vaultId, at.noteId));
     final shown =
         title ?? (n == null ? '' : noteTitleOf(n.meta.title, n.meta.path));
-    final accent = TextStyle(
-      fontFamily: StormTokens.sansFamily,
-      fontSize: t.codeSize,
-      color: t.accent,
-    );
     return SingleChildScrollView(
       padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 2.75, t.sp * 2, t.sp * 5),
       child: Column(
@@ -1252,16 +1244,13 @@ class _NotePanel extends ConsumerWidget {
             builder: (context, box) => Row(
               children: [
                 if (onBack != null) ...[
-                  Semantics(
+                  TextAction(
+                    key: const Key('back-to-wrote'),
+                    label: '‹ Wrote',
+                    semanticLabel: 'Back to Wrote',
+                    accent: true,
                     link: true,
-                    label: 'Back to Wrote',
-                    excludeSemantics: true,
                     onTap: onBack,
-                    child: GestureDetector(
-                      key: const Key('back-to-wrote'),
-                      onTap: onBack,
-                      child: Text('‹ Wrote', style: accent),
-                    ),
                   ),
                   SizedBox(width: t.sp),
                 ],
@@ -1275,21 +1264,14 @@ class _NotePanel extends ConsumerWidget {
                 ),
                 ConstrainedBox(
                   constraints: BoxConstraints(maxWidth: box.maxWidth / 2),
-                  child: Semantics(
+                  child: TextAction(
+                    key: const Key('open-in-notes'),
+                    label: 'Open in Notes ›',
+                    semanticLabel: 'Open in Notes',
+                    accent: true,
                     link: true,
-                    label: 'Open in Notes',
-                    excludeSemantics: true,
+                    oneLine: true,
                     onTap: open,
-                    child: GestureDetector(
-                      key: const Key('open-in-notes'),
-                      onTap: open,
-                      child: Text(
-                        'Open in Notes ›',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: accent,
-                      ),
-                    ),
                   ),
                 ),
               ],
@@ -1400,80 +1382,17 @@ class _WroteList extends ConsumerWidget {
       padding: padding,
       children: [
         for (final w in list)
-          _WroteRow(
-            write: w,
-            vault:
-                vaults.where((v) => v.id == w.vaultId).firstOrNull?.name ?? '',
+          WroteRow(
+            key: Key('wrote-${w.noteId ?? w.path}'),
+            title: _wroteTitle(w),
+            crumb: noteCrumb(
+              vaults.where((v) => v.id == w.vaultId).firstOrNull?.name ?? '',
+              w.path,
+            ),
+            meta: _wroteMeta(w),
             onTap: w.note == null ? null : () => onOpen(w.note!),
           ),
       ],
-    );
-  }
-}
-
-class _WroteRow extends StatelessWidget {
-  const _WroteRow({required this.write, required this.vault, this.onTap});
-
-  final SessionWrite write;
-  final String vault;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final w = write;
-    final radius = BorderRadius.circular(t.rControl);
-    return Semantics(
-      button: onTap != null,
-      label: '${_wroteTitle(w)}, ${_wroteMeta(w)}',
-      excludeSemantics: true,
-      onTap: onTap,
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: radius,
-        child: InkWell(
-          key: Key('wrote-${w.noteId ?? w.path}'),
-          borderRadius: radius,
-          hoverColor: t.surface,
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.5,
-              vertical: t.sp * 1.25,
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _wroteTitle(w),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: t.uiSize,
-                          color: t.text,
-                        ),
-                      ),
-                      SizedBox(height: t.sp * 0.25),
-                      Text(
-                        noteCrumb(vault, w.path),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: agentMono(t),
-                      ),
-                    ],
-                  ),
-                ),
-                SizedBox(width: t.sp),
-                Text(_wroteMeta(w), style: agentMono(t)),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -2016,38 +1935,25 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
           children: [
             Text('STARTED FROM', style: label),
             SizedBox(height: t.sp * 0.75),
-            Semantics(
-              button: true,
-              label: 'Open ${s.context!.title}',
-              excludeSemantics: true,
+            StormCard(
+              key: const Key('details-context'),
+              color: Colors.transparent,
+              radius: t.rControl,
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp * 1.5,
+                vertical: t.sp * 1.25,
+              ),
+              semanticLabel: 'Open ${s.context!.title}',
               onTap: () => widget.onOpenNote((
                 vaultId: s.context!.vaultId,
                 noteId: s.context!.noteId,
               )),
-              child: InkWell(
-                key: const Key('details-context'),
-                onTap: () => widget.onOpenNote((
-                  vaultId: s.context!.vaultId,
-                  noteId: s.context!.noteId,
-                )),
-                borderRadius: BorderRadius.circular(t.rControl),
-                child: Container(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: t.sp * 1.5,
-                    vertical: t.sp * 1.25,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(t.rControl),
-                    border: Border.all(color: t.border, width: t.bw),
-                  ),
-                  child: Text(
-                    '▤ ${s.context!.title} ›',
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.uiSize * 1.05,
-                      color: t.text,
-                    ),
-                  ),
+              child: Text(
+                '▤ ${s.context!.title} ›',
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.uiSize * 1.05,
+                  color: t.text,
                 ),
               ),
             ),
@@ -2072,35 +1978,29 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             )
           else
             for (final w in writes)
-              Semantics(
-                button: w.note != null,
-                label: '${_wroteTitle(w)}, ${_wroteMeta(w)}',
-                excludeSemantics: true,
+              Tappable(
+                semanticLabel: '${_wroteTitle(w)}, ${_wroteMeta(w)}',
+                minHitSize: 0,
                 onTap: w.note == null ? null : () => widget.onOpenNote(w.note!),
-                child: InkWell(
-                  onTap: w.note == null
-                      ? null
-                      : () => widget.onOpenNote(w.note!),
-                  child: Hairline(
-                    padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
-                    bottom: true,
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            _wroteTitle(w),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontFamily: StormTokens.sansFamily,
-                              fontSize: t.uiSize * 1.05,
-                              color: t.text,
-                            ),
+                child: Hairline(
+                  padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
+                  bottom: true,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _wroteTitle(w),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: StormTokens.sansFamily,
+                            fontSize: t.uiSize * 1.05,
+                            color: t.text,
                           ),
                         ),
-                        Text(_wroteMeta(w), style: agentMono(t)),
-                      ],
-                    ),
+                      ),
+                      Text(_wroteMeta(w), style: agentMono(t)),
+                    ],
                   ),
                 ),
               ),
@@ -2381,56 +2281,30 @@ class ImagePasteChip extends StatelessWidget {
             (state.count > 1
                 ? 'Pasting ${state.count} images…'
                 : 'Pasting image…');
-        return Container(
+        return OutlineTag(
           key: const Key('image-paste-chip'),
+          label: label,
+          mono: false,
+          color: error == null ? t.text2 : t.danger,
+          fill: t.surface2,
+          borderColor: error == null ? t.border : t.danger,
+          radius: t.rControl,
           padding: EdgeInsets.fromLTRB(
             t.sp * 1.5,
             t.sp * 0.75,
             t.sp * 0.75,
             t.sp * 0.75,
           ),
-          decoration: BoxDecoration(
-            color: t.surface2,
-            borderRadius: BorderRadius.circular(t.rControl),
-            border: Border.all(
-              color: error == null ? t.border : t.danger,
-              width: t.bw,
+          trailingGap: t.sp,
+          trailing: Tappable(
+            key: const Key('image-paste-dismiss'),
+            semanticLabel: error == null ? 'Cancel the paste' : 'Remove image',
+            onTap: controller.dismissPaste,
+            borderRadius: BorderRadius.circular(t.rControl * 0.6),
+            child: Padding(
+              padding: EdgeInsets.all(t.sp * 0.5),
+              child: Icon(LucideIcons.x, size: t.labelSize + 2, color: t.text3),
             ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.labelSize + 1,
-                    color: error == null ? t.text2 : t.danger,
-                  ),
-                ),
-              ),
-              SizedBox(width: t.sp),
-              Semantics(
-                button: true,
-                label: error == null ? 'Cancel the paste' : 'Dismiss',
-                excludeSemantics: true,
-                onTap: controller.dismissPaste,
-                child: InkWell(
-                  key: const Key('image-paste-dismiss'),
-                  onTap: controller.dismissPaste,
-                  borderRadius: BorderRadius.circular(t.rControl * 0.6),
-                  child: Padding(
-                    padding: EdgeInsets.all(t.sp * 0.5),
-                    child: Icon(
-                      LucideIcons.x,
-                      size: t.labelSize + 2,
-                      color: t.text3,
-                    ),
-                  ),
-                ),
-              ),
-            ],
           ),
         );
       },

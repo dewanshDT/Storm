@@ -6,6 +6,8 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/shell/sidebar_rows.dart' show UnseenDot;
+import '../ui/cards.dart' show Hairline;
+import '../ui/tappable.dart';
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart' show AgentOverview;
@@ -883,6 +885,81 @@ class _BadgeState extends State<_Badge> with SingleTickerProviderStateMixin {
                     : Border.all(color: widget.ring!, width: t.bw * 2),
               ),
       ),
+    );
+  }
+}
+
+/// A note an agent wrote: title and crumb over a meta line. [ruled] draws the
+/// crew page's bottom rule; otherwise a rounded row with side padding.
+class WroteRow extends StatelessWidget {
+  const WroteRow({
+    super.key,
+    required this.title,
+    required this.crumb,
+    required this.meta,
+    required this.onTap,
+    this.ruled = false,
+  });
+
+  final String title;
+  final String crumb;
+  final String meta;
+  final VoidCallback? onTap;
+  final bool ruled;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final radius = ruled ? null : BorderRadius.circular(t.rControl);
+    final body = Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.uiSize,
+                  color: t.text,
+                ),
+              ),
+              SizedBox(height: t.sp * 0.25),
+              Text(
+                crumb,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: agentMono(t),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(width: t.sp),
+        Text(meta, style: agentMono(t)),
+      ],
+    );
+    return Tappable(
+      semanticLabel: '$title, $meta',
+      hoverColor: t.surface,
+      borderRadius: radius,
+      minHitSize: 0,
+      onTap: onTap,
+      child: ruled
+          ? Hairline(
+              bottom: true,
+              padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
+              child: body,
+            )
+          : Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp * 1.5,
+                vertical: t.sp * 1.25,
+              ),
+              child: body,
+            ),
     );
   }
 }

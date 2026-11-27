@@ -29,6 +29,7 @@ class Tappable extends StatefulWidget {
     this.focusRing = true,
     this.toggled,
     this.checked,
+    this.link = false,
   });
 
   final Widget child;
@@ -53,6 +54,9 @@ class Tappable extends StatefulWidget {
 
   /// Checkbox semantics.
   final bool? checked;
+
+  /// Link semantics in place of button.
+  final bool link;
 
   @override
   State<Tappable> createState() => _TappableState();
@@ -117,7 +121,8 @@ class _TappableState extends State<Tappable> {
     );
 
     out = Semantics(
-      button: widget.toggled == null && widget.checked == null,
+      button: !widget.link && widget.toggled == null && widget.checked == null,
+      link: widget.link,
       toggled: widget.toggled,
       checked: widget.checked,
       enabled: live,
