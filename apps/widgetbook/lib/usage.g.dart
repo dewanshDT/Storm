@@ -450,7 +450,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/note_header.dart', 27),
     UsageSite('ui/pairing_screen.dart', 485),
     UsageSite('ui/pairing_screen.dart', 493),
-    UsageSite('ui/panels.dart', 183),
+    UsageSite('ui/panels.dart', 187),
     UsageSite('ui/report_sheet.dart', 401),
     UsageSite('ui/settings/access_page.dart', 167),
     UsageSite('ui/settings/access_page.dart', 193),
@@ -470,7 +470,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/trash_screen.dart', 248),
     UsageSite('ui/trash_screen.dart', 521),
     UsageSite('ui/trash_screen.dart', 723),
-    UsageSite('ui/widgets.dart', 1212),
+    UsageSite('ui/widgets.dart', 1222),
   ],
   'StormCheckbox': [
     UsageSite('ui/markdown/storm_markdown_view.dart', 103),
@@ -483,7 +483,7 @@ const componentUsage = <String, List<UsageSite>>{
   ],
   'StormIcon': [
     UsageSite('ui/shell/vault_sidebar.dart', 214),
-    UsageSite('ui/widgets.dart', 1513),
+    UsageSite('ui/widgets.dart', 1523),
   ],
   'StormInput': [
     UsageSite('ui/lan_servers.dart', 747),

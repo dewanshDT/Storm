@@ -1121,6 +1121,16 @@ class ImageThumbnail extends StatelessWidget {
               width: side,
               height: side,
               fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => ColoredBox(
+                color: t.surface2,
+                child: Center(
+                  child: Icon(
+                    LucideIcons.image_off,
+                    size: side * 0.4,
+                    color: t.text3,
+                  ),
+                ),
+              ),
             ),
           ),
           Positioned(

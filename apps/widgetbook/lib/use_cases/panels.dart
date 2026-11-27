@@ -58,6 +58,16 @@ Widget panelTabsWrap(BuildContext context) => _tabs(
   width: 260,
 );
 
+@widgetbook.UseCase(name: 'long labels (scroll)', type: PanelTabs, path: _path)
+Widget panelTabsScroll(BuildContext context) => _tabs(
+  const [
+    ('a', 'A tab with a very long label'),
+    ('b', 'Another long label for a narrow panel'),
+  ],
+  'a',
+  width: 260,
+);
+
 @widgetbook.UseCase(name: 'long labels (wrap)', type: PanelTabs, path: _path)
 Widget panelTabsLong(BuildContext context) => _tabs(
   const [

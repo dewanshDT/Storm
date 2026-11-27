@@ -119,13 +119,17 @@ class StatusPill extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (dot != null) ...[dot!, SizedBox(width: t.sp * 0.75)],
-          Text(
-            label,
-            style: TextStyle(
-              fontFamily: StormTokens.monoFamily,
-              fontSize: t.labelSize,
-              color: color,
-              height: 1.3,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.labelSize,
+                color: color,
+                height: 1.3,
+              ),
             ),
           ),
         ],

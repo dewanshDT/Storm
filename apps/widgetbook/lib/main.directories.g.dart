@@ -506,6 +506,10 @@ final directories = <_widgetbook.WidgetbookNode>[
             builder: _storm_widgetbook_use_cases_panels.panelTabsDefault,
           ),
           _widgetbook.WidgetbookUseCase(
+            name: 'long labels (scroll)',
+            builder: _storm_widgetbook_use_cases_panels.panelTabsScroll,
+          ),
+          _widgetbook.WidgetbookUseCase(
             name: 'long labels (wrap)',
             builder: _storm_widgetbook_use_cases_panels.panelTabsLong,
           ),
@@ -991,6 +995,11 @@ final directories = <_widgetbook.WidgetbookNode>[
         name: 'ImageThumbnail',
         useCases: [
           _widgetbook.WidgetbookUseCase(
+            name: 'broken image',
+            builder: _storm_widgetbook_use_cases_image_thumbnail
+                .imageThumbnailBroken,
+          ),
+          _widgetbook.WidgetbookUseCase(
             name: 'default',
             builder: _storm_widgetbook_use_cases_image_thumbnail
                 .imageThumbnailDefault,
@@ -1271,6 +1280,10 @@ final directories = <_widgetbook.WidgetbookNode>[
           _widgetbook.WidgetbookUseCase(
             name: 'error',
             builder: _storm_widgetbook_use_cases_session_status.statusPillError,
+          ),
+          _widgetbook.WidgetbookUseCase(
+            name: 'long label',
+            builder: _storm_widgetbook_use_cases_session_status.statusPillLong,
           ),
         ],
       ),

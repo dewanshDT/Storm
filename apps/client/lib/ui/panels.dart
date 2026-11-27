@@ -8,7 +8,8 @@ import 'controls.dart';
 import 'tokens.dart';
 
 /// Active `accent` 600 on `accentSoft`; inactive `text3` 500. With [wrap],
-/// tabs that do not fit go on a second line rather than out of sight.
+/// tabs that do not fit go on a second line rather than out of sight; without
+/// it the row scrolls sideways.
 class PanelTabs<T> extends StatelessWidget {
   const PanelTabs({
     super.key,
@@ -66,10 +67,13 @@ class PanelTabs<T> extends StatelessWidget {
     if (wrap) {
       return Wrap(spacing: t.sp * 0.5, runSpacing: t.sp * 0.5, children: items);
     }
-    return Row(
-      children: [
-        for (final item in items) ...[item, SizedBox(width: t.sp * 0.5)],
-      ],
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final item in items) ...[item, SizedBox(width: t.sp * 0.5)],
+        ],
+      ),
     );
   }
 }

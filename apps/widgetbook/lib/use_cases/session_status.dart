@@ -99,6 +99,22 @@ Widget statusPillDefault(BuildContext context) {
   );
 }
 
+@widgetbook.UseCase(name: 'long label', type: StatusPill, path: _path)
+Widget statusPillLong(BuildContext context) {
+  final t = context.tokens;
+  return Padding(
+    padding: const EdgeInsets.all(16),
+    child: SizedBox(
+      width: 160,
+      child: StatusPill(
+        label: 'Waiting for the upstream provider quota to reset',
+        color: t.green,
+        dot: Icon(Icons.circle, size: 8, color: t.green),
+      ),
+    ),
+  );
+}
+
 @widgetbook.UseCase(name: 'error', type: StatusPill, path: _path)
 Widget statusPillError(BuildContext context) {
   final t = context.tokens;
