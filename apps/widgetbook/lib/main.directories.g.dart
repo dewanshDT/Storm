@@ -17,8 +17,6 @@ import 'package:storm_widgetbook/use_cases/accent_picker.dart'
     as _storm_widgetbook_use_cases_accent_picker;
 import 'package:storm_widgetbook/use_cases/brand_mark.dart'
     as _storm_widgetbook_use_cases_brand_mark;
-import 'package:storm_widgetbook/use_cases/breadcrumb.dart'
-    as _storm_widgetbook_use_cases_breadcrumb;
 import 'package:storm_widgetbook/use_cases/choice_cards.dart'
     as _storm_widgetbook_use_cases_choice_cards;
 import 'package:storm_widgetbook/use_cases/choice_chips.dart'
@@ -27,8 +25,6 @@ import 'package:storm_widgetbook/use_cases/code_block.dart'
     as _storm_widgetbook_use_cases_code_block;
 import 'package:storm_widgetbook/use_cases/count_badge.dart'
     as _storm_widgetbook_use_cases_count_badge;
-import 'package:storm_widgetbook/use_cases/folder_row.dart'
-    as _storm_widgetbook_use_cases_folder_row;
 import 'package:storm_widgetbook/use_cases/hairline.dart'
     as _storm_widgetbook_use_cases_hairline;
 import 'package:storm_widgetbook/use_cases/image_thumbnail.dart'
@@ -57,8 +53,6 @@ import 'package:storm_widgetbook/use_cases/popover.dart'
     as _storm_widgetbook_use_cases_popover;
 import 'package:storm_widgetbook/use_cases/reading_measure.dart'
     as _storm_widgetbook_use_cases_reading_measure;
-import 'package:storm_widgetbook/use_cases/save_state_label.dart'
-    as _storm_widgetbook_use_cases_save_state_label;
 import 'package:storm_widgetbook/use_cases/section_label.dart'
     as _storm_widgetbook_use_cases_section_label;
 import 'package:storm_widgetbook/use_cases/session_status.dart'
@@ -480,6 +474,11 @@ final directories = <_widgetbook.WidgetbookNode>[
             builder:
                 _storm_widgetbook_use_cases_key_value_list.keyValueListLong,
           ),
+          _widgetbook.WidgetbookUseCase(
+            name: 'widget values',
+            builder:
+                _storm_widgetbook_use_cases_key_value_list.keyValueListWidgets,
+          ),
         ],
       ),
       _widgetbook.WidgetbookComponent(
@@ -876,23 +875,6 @@ final directories = <_widgetbook.WidgetbookNode>[
         ],
       ),
       _widgetbook.WidgetbookComponent(
-        name: 'Breadcrumb',
-        useCases: [
-          _widgetbook.WidgetbookUseCase(
-            name: 'default',
-            builder: _storm_widgetbook_use_cases_breadcrumb.breadcrumbDefault,
-          ),
-          _widgetbook.WidgetbookUseCase(
-            name: 'long trail (scrolls)',
-            builder: _storm_widgetbook_use_cases_breadcrumb.breadcrumbLong,
-          ),
-          _widgetbook.WidgetbookUseCase(
-            name: 'single crumb',
-            builder: _storm_widgetbook_use_cases_breadcrumb.breadcrumbSingle,
-          ),
-        ],
-      ),
-      _widgetbook.WidgetbookComponent(
         name: 'CodeBlock',
         useCases: [
           _widgetbook.WidgetbookUseCase(
@@ -915,23 +897,6 @@ final directories = <_widgetbook.WidgetbookNode>[
           _widgetbook.WidgetbookUseCase(
             name: 'default',
             builder: _storm_widgetbook_use_cases_count_badge.countBadgeDefault,
-          ),
-        ],
-      ),
-      _widgetbook.WidgetbookComponent(
-        name: 'FolderRow',
-        useCases: [
-          _widgetbook.WidgetbookUseCase(
-            name: 'default',
-            builder: _storm_widgetbook_use_cases_folder_row.folderRowDefault,
-          ),
-          _widgetbook.WidgetbookUseCase(
-            name: 'disabled (no onTap)',
-            builder: _storm_widgetbook_use_cases_folder_row.folderRowDisabled,
-          ),
-          _widgetbook.WidgetbookUseCase(
-            name: 'long text (overflow)',
-            builder: _storm_widgetbook_use_cases_folder_row.folderRowLong,
           ),
         ],
       ),
@@ -1166,26 +1131,6 @@ final directories = <_widgetbook.WidgetbookNode>[
             name: 'default',
             builder: _storm_widgetbook_use_cases_reading_measure
                 .readingMeasureDefault,
-          ),
-        ],
-      ),
-      _widgetbook.WidgetbookComponent(
-        name: 'SaveStateLabel',
-        useCases: [
-          _widgetbook.WidgetbookUseCase(
-            name: 'default',
-            builder: _storm_widgetbook_use_cases_save_state_label
-                .saveStateLabelDefault,
-          ),
-          _widgetbook.WidgetbookUseCase(
-            name: 'every tone',
-            builder: _storm_widgetbook_use_cases_save_state_label
-                .saveStateLabelTones,
-          ),
-          _widgetbook.WidgetbookUseCase(
-            name: 'long text (overflow)',
-            builder:
-                _storm_widgetbook_use_cases_save_state_label.saveStateLabelLong,
           ),
         ],
       ),

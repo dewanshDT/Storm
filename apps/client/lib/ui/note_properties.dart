@@ -920,24 +920,21 @@ class _AddProperty extends StatelessWidget {
       padding: EdgeInsets.only(top: t.sp),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: Tooltip(
-          message: 'Add property',
-          child: InkWell(
-            onTap: onAdd,
-            borderRadius: BorderRadius.circular(t.rControl * 0.6),
-            child: Container(
-              width: side,
-              height: side,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(t.rControl * 0.6),
-                border: Border.all(
-                  color: t.border,
-                  width: t.bw,
-                  strokeAlign: BorderSide.strokeAlignInside,
-                ),
+        child: Tappable(
+          tooltip: 'Add property',
+          semanticLabel: 'Add property',
+          onTap: onAdd,
+          borderRadius: BorderRadius.circular(t.rChip),
+          child: SizedBox(
+            width: side,
+            height: side,
+            child: StormCard(
+              color: Colors.transparent,
+              radius: t.rChip,
+              padding: EdgeInsets.zero,
+              child: Center(
+                child: Icon(LucideIcons.plus, size: t.codeSize, color: t.text3),
               ),
-              child: Icon(LucideIcons.plus, size: t.codeSize, color: t.text3),
             ),
           ),
         ),
