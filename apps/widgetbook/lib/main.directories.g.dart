@@ -995,11 +995,6 @@ final directories = <_widgetbook.WidgetbookNode>[
         name: 'ImageThumbnail',
         useCases: [
           _widgetbook.WidgetbookUseCase(
-            name: 'broken image',
-            builder: _storm_widgetbook_use_cases_image_thumbnail
-                .imageThumbnailBroken,
-          ),
-          _widgetbook.WidgetbookUseCase(
             name: 'default',
             builder: _storm_widgetbook_use_cases_image_thumbnail
                 .imageThumbnailDefault,
