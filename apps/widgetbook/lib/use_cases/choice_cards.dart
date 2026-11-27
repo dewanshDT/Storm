@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:storm/ui/controls.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm_widgetbook/stateful_value.dart';
 import 'package:widgetbook/widgetbook.dart';
 import 'package:widgetbook_annotation/widgetbook_annotation.dart' as widgetbook;
@@ -114,3 +115,69 @@ Widget choiceCardsLong(BuildContext context) => _cards(context, const [
   ),
   ChoiceCardOption('b', 'Short'),
 ]);
+
+Widget _card(
+  BuildContext context, {
+  String title = 'Catppuccin',
+  String? subtitle = 'Mocha',
+  String? note = 'Inspired by Catppuccin',
+  bool selected = false,
+  bool enabled = true,
+  Widget? alert,
+  double width = 220,
+}) => Padding(
+  padding: const EdgeInsets.all(16),
+  child: SizedBox(
+    width: width,
+    child: ChoiceCard(
+      title: title,
+      subtitle: subtitle,
+      note: note,
+      alert: alert,
+      selected: selected,
+      onTap: enabled ? () {} : null,
+    ),
+  ),
+);
+
+@widgetbook.UseCase(name: 'default', type: ChoiceCard, path: _path)
+Widget choiceCardDefault(BuildContext context) => _card(
+  context,
+  title: context.knobs.string(label: 'title', initialValue: 'Catppuccin'),
+  subtitle: context.knobs.stringOrNull(
+    label: 'subtitle',
+    initialValue: 'Mocha',
+  ),
+  note: context.knobs.stringOrNull(
+    label: 'note',
+    initialValue: 'Inspired by Catppuccin',
+  ),
+  selected: context.knobs.boolean(label: 'selected'),
+  enabled: context.knobs.boolean(label: 'enabled', initialValue: true),
+);
+
+@widgetbook.UseCase(name: 'selected', type: ChoiceCard, path: _path)
+Widget choiceCardSelected(BuildContext context) =>
+    _card(context, selected: true);
+
+@widgetbook.UseCase(name: 'disabled', type: ChoiceCard, path: _path)
+Widget choiceCardDisabled(BuildContext context) =>
+    _card(context, enabled: false);
+
+@widgetbook.UseCase(name: 'alert', type: ChoiceCard, path: _path)
+Widget choiceCardAlert(BuildContext context) => _card(
+  context,
+  alert: Text(
+    'Needs a newer host',
+    style: TextStyle(color: context.tokens.danger),
+  ),
+);
+
+@widgetbook.UseCase(name: 'long text (overflow)', type: ChoiceCard, path: _path)
+Widget choiceCardLong(BuildContext context) => _card(
+  context,
+  title: 'A card whose title is far too long for the width it is given',
+  subtitle: 'And a subtitle that is every bit as long as the title above it',
+  note: 'Plus a note that runs on for a while as well',
+  width: 200,
+);
