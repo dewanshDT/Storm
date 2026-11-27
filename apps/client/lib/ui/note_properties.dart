@@ -509,9 +509,10 @@ class _DateEditor extends StatelessWidget {
     final t = context.tokens;
     return Align(
       alignment: Alignment.centerLeft,
-      child: InkWell(
+      child: Tappable(
         onTap: () => _pick(context, parsed),
-        borderRadius: BorderRadius.circular(t.rControl * 0.6),
+        semanticLabel: label,
+        borderRadius: BorderRadius.circular(t.rChip),
         child: Padding(
           padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
           child: Text(
@@ -737,37 +738,41 @@ class _NewValueChipState extends State<_NewValueChip> {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
-      height: t.sp * 3.25,
+    return ConstrainedBox(
       constraints: BoxConstraints(minWidth: t.sp * 8, maxWidth: t.sp * 22),
-      padding: EdgeInsets.symmetric(horizontal: t.sp),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: t.amber.withValues(alpha: 0.6), width: t.bw),
-      ),
-      child: TextField(
-        controller: _controller,
-        focusNode: _focus,
-        style: TextStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize,
-          color: t.amber,
+      child: SizedBox(
+        height: t.sp * 3.25,
+        child: StormCard(
+          color: Colors.transparent,
+          radius: t.rPill,
+          borderColor: t.amber.withValues(alpha: 0.6),
+          padding: EdgeInsets.symmetric(horizontal: t.sp),
+          child: Center(
+            child: TextField(
+              controller: _controller,
+              focusNode: _focus,
+              style: TextStyle(
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.labelSize,
+                color: t.amber,
+              ),
+              cursorHeight: t.labelSize * 1.2,
+              decoration: const InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                filled: false,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onSubmitted: (value) {
+                widget.onSubmit(value);
+                _controller.clear();
+                _focus.requestFocus();
+              },
+            ),
+          ),
         ),
-        cursorHeight: t.labelSize * 1.2,
-        decoration: const InputDecoration(
-          isDense: true,
-          border: InputBorder.none,
-          enabledBorder: InputBorder.none,
-          focusedBorder: InputBorder.none,
-          filled: false,
-          contentPadding: EdgeInsets.zero,
-        ),
-        onSubmitted: (value) {
-          widget.onSubmit(value);
-          _controller.clear();
-          _focus.requestFocus();
-        },
       ),
     );
   }
@@ -782,23 +787,24 @@ class _AddValueChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Tooltip(
-      message: 'Add a value',
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(999),
-        child: Container(
-          height: t.sp * 3.25,
-          width: t.sp * 4.25,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: t.border, width: t.bw),
-          ),
-          child: Icon(
-            LucideIcons.plus,
-            size: t.labelSize * 1.2,
-            color: t.text3,
+    return Tappable(
+      tooltip: 'Add a value',
+      semanticLabel: 'Add a value',
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(t.rPill),
+      child: SizedBox(
+        height: t.sp * 3.25,
+        width: t.sp * 4.25,
+        child: StormCard(
+          color: Colors.transparent,
+          radius: t.rPill,
+          padding: EdgeInsets.zero,
+          child: Center(
+            child: Icon(
+              LucideIcons.plus,
+              size: t.labelSize * 1.2,
+              color: t.text3,
+            ),
           ),
         ),
       ),
@@ -820,51 +826,35 @@ class ValueChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
+    return SizedBox(
       height: t.sp * 3.25,
-      constraints: BoxConstraints(maxWidth: t.sp * 27),
-      padding: EdgeInsets.only(
-        left: t.sp,
-        right: onRemove == null ? t.sp : t.sp * 0.5,
-      ),
-      decoration: BoxDecoration(
+      child: OutlineTag(
+        label: label,
+        color: t.amber,
         // A list value is a tag in all but name — `tags: [a, b]` is the
         // commonest list property there is — so it wears the tag colour.
-        color: t.amberSoft,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: StormTokens.monoFamily,
-                fontSize: t.labelSize,
-                height: 1.2,
-                color: t.amber,
-              ),
-            ),
-          ),
-          if (onRemove != null) ...[
-            SizedBox(width: t.sp * 0.375),
-            // A plain InkWell, not an IconButton: the latter enforces a
-            // minimum tap target that doubles the chip's height.
-            InkWell(
-              onTap: onRemove,
-              borderRadius: BorderRadius.circular(999),
-              child: Tooltip(
-                message: 'Remove $label',
+        fill: t.amberSoft,
+        maxWidth: t.sp * 27,
+        lineHeight: 1.2,
+        padding: EdgeInsets.only(
+          left: t.sp,
+          right: onRemove == null ? t.sp : t.sp * 0.5,
+        ),
+        trailingGap: t.sp * 0.375,
+        trailing: onRemove == null
+            ? null
+            // Not an IconButton: its minimum tap target doubles the chip's
+            // height.
+            : Tappable(
+                onTap: onRemove,
+                tooltip: 'Remove $label',
+                semanticLabel: 'Remove $label',
+                borderRadius: BorderRadius.circular(t.rPill),
                 child: Padding(
                   padding: EdgeInsets.all(t.sp * 0.375),
                   child: Icon(LucideIcons.x, size: t.labelSize, color: t.amber),
                 ),
               ),
-            ),
-          ],
-        ],
       ),
     );
   }
