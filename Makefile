@@ -191,7 +191,7 @@ verify-isolation-units:
 test-client:
 	cd $(CLIENT) && flutter test
 
-## test-widgetbook: the catalogue's smoke tests, and its generated directory is up to date
+## test-widgetbook: the catalogue's smoke and golden tests, and its generated directory is up to date
 #
 # `lib/main.directories.g.dart` is committed so nothing else needs build_runner;
 # regenerating it here and checking the diff is what keeps it honest. The usage
@@ -613,6 +613,10 @@ widgetbook:
 widgetbook-web:
 	cd $(WIDGETBOOK) && flutter build web --release
 
+## goldens: regenerate the catalogue's golden images (apps/widgetbook/test/goldens/ci)
+goldens:
+	cd $(WIDGETBOOK) && flutter test --update-goldens --tags golden
+
 ## widgetbook-codegen: regenerate the catalogue's directory from its @UseCase functions
 widgetbook-codegen:
 	cd $(WIDGETBOOK) && dart run build_runner build
@@ -673,7 +677,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-widgetbook widgetbook widgetbook-web widgetbook-codegen widgetbook-usage test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-widgetbook widgetbook widgetbook-web widgetbook-codegen widgetbook-usage goldens test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check test-release-channel test-apt-repo-build \
         build-server deploy deploy-check

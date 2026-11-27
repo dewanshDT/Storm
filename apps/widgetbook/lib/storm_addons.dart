@@ -41,21 +41,22 @@ List<WidgetbookTheme<ThemeData>> stormThemes() => [
       ),
 ];
 
+/// The theme, surface colour and text style the catalogue and its goldens
+/// share, so a golden shows what the toolbar's theme switch shows.
+Widget stormThemed(ThemeData theme, Widget child) => Theme(
+  data: theme,
+  child: Material(
+    color: theme.scaffoldBackgroundColor,
+    child: DefaultTextStyle(style: theme.textTheme.bodyMedium!, child: child),
+  ),
+);
+
 ThemeAddon<ThemeData> stormThemeAddon() {
   final themes = stormThemes();
   return ThemeAddon<ThemeData>(
     themes: themes,
     initialTheme: themes.first,
-    themeBuilder: (context, theme, child) => Theme(
-      data: theme,
-      child: Material(
-        color: theme.scaffoldBackgroundColor,
-        child: DefaultTextStyle(
-          style: theme.textTheme.bodyMedium!,
-          child: child,
-        ),
-      ),
-    ),
+    themeBuilder: (context, theme, child) => stormThemed(theme, child),
   );
 }
 

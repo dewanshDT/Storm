@@ -62,6 +62,27 @@ component built through a tear-off or a helper is not seen. Run
 `make widgetbook-usage` after changing the client and commit the result;
 `make test-widgetbook` and CI regenerate it and fail on a diff.
 
+## Golden tests
+
+`test/goldens_test.dart` renders every component's use cases (through the same
+builders the catalogue uses, knobs at their defaults) under Storm dark, Storm
+light and SlowFlow earth, at 390 (phone) and 1280 (desktop) wide, into one
+image per component in `test/goldens/ci/`. `flutter test` (so `make
+test-widgetbook` and CI) compares them; after an intended visual change run
+
+```sh
+make goldens             # flutter test --update-goldens --tags golden
+```
+
+and commit the changed images. Only Alchemist's CI goldens are committed:
+text is drawn as solid blocks by design, so they hold layout, colour and
+spacing but not glyphs, and they render the same on every machine. Platform
+goldens are switched off in `test/flutter_test_config.dart`. Because the
+blocks are wider than real text, a row can overflow in a golden that does not
+in the app; overflow is not a failure here. Animations are frozen
+(`TickerMode` off). When CI fails, the diffs are in the
+`widgetbook-golden-failures` artifact.
+
 ## Notes
 
 - Fonts are re-declared in `pubspec.yaml` from `../client/assets/fonts/`: a

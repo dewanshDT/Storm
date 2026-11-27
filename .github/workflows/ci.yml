@@ -556,6 +556,12 @@ jobs:
       - run: dart tool/ui_usage.dart && dart format lib/usage.g.dart
       - run: git diff --exit-code -- lib/main.directories.g.dart lib/usage.g.dart
       - run: flutter test
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: widgetbook-golden-failures
+          path: apps/widgetbook/test/**/failures/
+          if-no-files-found: ignore
 
   # The desktop runners are native code the Dart suite never compiles
   # (decision 125): a template edit or a plugin that lacks Windows support
