@@ -170,6 +170,8 @@ class TextAction extends StatelessWidget {
     this.danger = false,
     this.large = false,
     this.lineHeight,
+    this.mono = false,
+    this.semanticLabel,
   });
 
   final String label;
@@ -178,6 +180,12 @@ class TextAction extends StatelessWidget {
   final bool danger;
   final bool large;
   final double? lineHeight;
+
+  /// Label-sized mono, flush with its line: the inline link in a label row.
+  final bool mono;
+
+  /// What a screen reader says when it is longer than [label].
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -188,16 +196,20 @@ class TextAction extends StatelessWidget {
         ? t.accent
         : t.text2;
     return Tappable(
-      semanticLabel: label,
+      semanticLabel: semanticLabel ?? label,
       onTap: onTap,
       borderRadius: BorderRadius.circular(t.rChip),
       child: Padding(
-        padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
+        padding: EdgeInsets.symmetric(vertical: mono ? 0 : t.sp * 0.25),
         child: Text(
           label,
           style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: large ? t.uiSize : t.codeSize,
+            fontFamily: mono ? StormTokens.monoFamily : StormTokens.sansFamily,
+            fontSize: mono
+                ? t.labelSize
+                : large
+                ? t.uiSize
+                : t.codeSize,
             height: lineHeight,
             color: onTap == null ? t.text3 : color,
           ),

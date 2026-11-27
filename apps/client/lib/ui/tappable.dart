@@ -24,6 +24,7 @@ class Tappable extends StatefulWidget {
     this.semanticLabel,
     this.tooltip,
     this.borderRadius,
+    this.hoverColor,
     this.minHitSize,
     this.focusRing = true,
     this.toggled,
@@ -39,6 +40,9 @@ class Tappable extends StatefulWidget {
   final String? semanticLabel;
   final String? tooltip;
   final BorderRadius? borderRadius;
+
+  /// The hover fill; the theme's by default.
+  final Color? hoverColor;
 
   /// Overrides the platform minimum; 0 turns the padding off.
   final double? minHitSize;
@@ -87,6 +91,7 @@ class _TappableState extends State<Tappable> {
             onSecondaryTap: live ? widget.onSecondaryTap : null,
             onLongPress: live ? widget.onLongPress : null,
             borderRadius: radius,
+            hoverColor: widget.hoverColor,
             child: widget.child,
           ),
           if (_focusRing && widget.focusRing)

@@ -31,6 +31,7 @@ class OutlineTag extends StatelessWidget {
     this.wrap = false,
     this.radius,
     this.trailingGap,
+    this.strike = false,
   });
 
   final String label;
@@ -61,6 +62,9 @@ class OutlineTag extends StatelessWidget {
   /// Space before [trailing]; `0.75 sp` by default.
   final double? trailingGap;
 
+  /// Strikes the label through, for a thing that no longer exists.
+  final bool strike;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
@@ -77,6 +81,8 @@ class OutlineTag extends StatelessWidget {
         fontSize: t.labelSize,
         color: color ?? tone.color(t),
         height: lineHeight,
+        decoration: strike ? TextDecoration.lineThrough : null,
+        decorationColor: strike ? color ?? tone.color(t) : null,
       ),
     );
     final tag = Container(

@@ -62,7 +62,13 @@ void main() {
   testWidgets('lower case, outlined, never coloured by its note', (t) async {
     await pumpIn(t, const RoleTag(role: reviewer));
     expect(find.text('storm reviewer'), findsOneWidget);
-    final box = t.widget<Container>(tag).decoration! as BoxDecoration;
+    final box =
+        t
+                .widget<Container>(
+                  find.descendant(of: tag, matching: find.byType(Container)),
+                )
+                .decoration!
+            as BoxDecoration;
     expect(box.color, isNull);
     expect(box.border, isNotNull);
   });

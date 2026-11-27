@@ -9,11 +9,19 @@ import 'package:go_router/go_router.dart';
 
 import '../router.dart';
 import '../ui/accents.dart';
-import '../ui/settings/settings_widgets.dart' show promptForText;
+import '../ui/settings/settings_widgets.dart' show TextAction, promptForText;
 import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
-import '../ui/widgets.dart' show PopoverItem, PopoverTone;
+import '../ui/widgets.dart'
+    show
+        Hairline,
+        OutlineTag,
+        OutlineTagShape,
+        PopoverItem,
+        PopoverTone,
+        StormCard,
+        Tappable;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
@@ -119,21 +127,17 @@ class RoleTag extends StatelessWidget {
     final bounds = _roleBounds(context);
     return Opacity(
       opacity: role.deleted ? 0.6 : 1,
-      child: Container(
+      child: OutlineTag(
         key: Key('role-tag-${role.noteId}'),
-        constraints: BoxConstraints(minWidth: bounds.min, maxWidth: bounds.max),
+        label: roleTagText(role, launchRole: launchRole),
+        color: t.text2,
+        borderColor: t.border,
+        shape: OutlineTagShape.tag,
+        strike: role.deleted,
+        lineHeight: 1.45,
+        minWidth: bounds.min,
+        maxWidth: bounds.max,
         padding: EdgeInsets.symmetric(horizontal: t.sp * 0.625),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(t.rControl * 0.5),
-          border: Border.all(color: t.border, width: t.bw),
-        ),
-        child: Text(
-          roleTagText(role, launchRole: launchRole),
-          maxLines: 1,
-          softWrap: false,
-          overflow: TextOverflow.ellipsis,
-          style: _roleStyle(t, deleted: role.deleted),
-        ),
       ),
     );
   }
@@ -361,99 +365,96 @@ class _CrewHeaderState extends State<CrewHeader> {
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onSecondaryTapUp: (_) => widget.onMenu(_anchor),
-        child: Semantics(
-          button: true,
-          selected: widget.selected,
-          expanded: !widget.collapsed,
-          label: '${c.name}, crew, $count',
-          excludeSemantics: true,
-          onTap: widget.onOpen,
-          customSemanticsActions: {
-            CustomSemanticsAction(
-              label: widget.collapsed ? 'Expand' : 'Collapse',
-            ): widget.onToggle,
-          },
-          child: Material(
-            key: _anchor,
-            color: outlined
-                ? Color.alphaBlend(
-                    t.danger.withValues(alpha: 0.09),
-                    widget.selected || _hover ? t.surface2 : t.surface,
-                  )
-                : plain,
-            shape: RoundedRectangleBorder(
-              borderRadius: radius,
-              side: outlined
-                  ? BorderSide(color: t.danger, width: t.bw)
-                  : BorderSide.none,
-            ),
-            child: InkWell(
-              key: Key('crew-${c.id}'),
-              borderRadius: radius,
-              onTap: widget.onOpen,
-              child: Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: t.sp,
-                  vertical: t.sp * 0.875,
-                ),
-                // As tall as the hover ··· so it showing never moves a row.
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: t.sp * 2.5),
-                  child: Row(
-                    children: [
-                      GestureDetector(
-                        key: Key('crew-chevron-${c.id}'),
-                        behavior: HitTestBehavior.opaque,
-                        onTap: widget.onToggle,
-                        child: SizedBox(
-                          width: t.sp * 1.5,
-                          child: Icon(
-                            widget.collapsed
-                                ? LucideIcons.chevron_right
-                                : LucideIcons.chevron_down,
-                            size: t.labelSize,
-                            color: t.text3,
+      child: Semantics(
+        button: true,
+        selected: widget.selected,
+        expanded: !widget.collapsed,
+        label: '${c.name}, crew, $count',
+        excludeSemantics: true,
+        onTap: widget.onOpen,
+        customSemanticsActions: {
+          CustomSemanticsAction(
+            label: widget.collapsed ? 'Expand' : 'Collapse',
+          ): widget.onToggle,
+        },
+        child: Material(
+          key: _anchor,
+          color: outlined
+              ? Color.alphaBlend(
+                  t.danger.withValues(alpha: 0.09),
+                  widget.selected || _hover ? t.surface2 : t.surface,
+                )
+              : plain,
+          shape: RoundedRectangleBorder(
+            borderRadius: radius,
+            side: outlined
+                ? BorderSide(color: t.danger, width: t.bw)
+                : BorderSide.none,
+          ),
+          child: Tappable(
+            key: Key('crew-${c.id}'),
+            borderRadius: radius,
+            onTap: widget.onOpen,
+            onSecondaryTap: () => widget.onMenu(_anchor),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp,
+                vertical: t.sp * 0.875,
+              ),
+              // As tall as the hover ··· so it showing never moves a row.
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: t.sp * 2.5),
+                child: Row(
+                  children: [
+                    Tappable(
+                      key: Key('crew-chevron-${c.id}'),
+                      onTap: widget.onToggle,
+                      child: SizedBox(
+                        width: t.sp * 1.5,
+                        child: Icon(
+                          widget.collapsed
+                              ? LucideIcons.chevron_right
+                              : LucideIcons.chevron_down,
+                          size: t.labelSize,
+                          color: t.text3,
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: t.sp),
+                    CrewSquare(accent: c.accent, size: t.sp * 1.25),
+                    SizedBox(width: t.sp),
+                    Expanded(
+                      child:
+                          widget.nameField ??
+                          Text(
+                            c.name,
+                            key: Key('crew-name-${c.id}'),
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
+                            style: crewHeaderNameStyle(t),
                           ),
-                        ),
+                    ),
+                    SizedBox(width: t.sp),
+                    Text(
+                      count,
+                      key: Key('crew-count-${c.id}'),
+                      style: TextStyle(
+                        fontFamily: StormTokens.monoFamily,
+                        fontSize: t.labelSize,
+                        color: roll == null
+                            ? t.text3
+                            : (roll.loud ? t.danger : t.text2),
                       ),
-                      SizedBox(width: t.sp),
-                      CrewSquare(accent: c.accent, size: t.sp * 1.25),
-                      SizedBox(width: t.sp),
-                      Expanded(
-                        child:
-                            widget.nameField ??
-                            Text(
-                              c.name,
-                              key: Key('crew-name-${c.id}'),
-                              maxLines: 1,
-                              softWrap: false,
-                              overflow: TextOverflow.ellipsis,
-                              style: crewHeaderNameStyle(t),
-                            ),
+                    ),
+                    if (_hover) ...[
+                      SizedBox(width: t.sp * 0.5),
+                      CrewDots(
+                        key: Key('crew-menu-${c.id}'),
+                        onTap: () => widget.onMenu(_anchor),
                       ),
-                      SizedBox(width: t.sp),
-                      Text(
-                        count,
-                        key: Key('crew-count-${c.id}'),
-                        style: TextStyle(
-                          fontFamily: StormTokens.monoFamily,
-                          fontSize: t.labelSize,
-                          color: roll == null
-                              ? t.text3
-                              : (roll.loud ? t.danger : t.text2),
-                        ),
-                      ),
-                      if (_hover) ...[
-                        SizedBox(width: t.sp * 0.5),
-                        CrewDots(
-                          key: Key('crew-menu-${c.id}'),
-                          onTap: () => widget.onMenu(_anchor),
-                        ),
-                      ],
                     ],
-                  ),
+                  ],
                 ),
               ),
             ),
@@ -523,22 +524,16 @@ class PhoneCrewHeader extends StatelessWidget {
               ? BorderSide(color: t.danger, width: t.bw)
               : BorderSide.none,
         ),
-        child: InkWell(
+        child: Tappable(
           key: Key('crew-${c.id}'),
           onTap: onOpen,
           onLongPress: onActions,
-          child: Container(
+          child: Hairline(
+            bottom: !outlined,
             padding: EdgeInsets.symmetric(
               vertical: t.sp * 1.5,
               horizontal: outlined ? t.sp : 0,
             ),
-            decoration: outlined
-                ? null
-                : BoxDecoration(
-                    border: Border(
-                      bottom: BorderSide(color: t.border, width: t.bw),
-                    ),
-                  ),
             child: Row(
               children: [
                 CrewSquare(accent: c.accent, size: t.sp * 1.5),
@@ -570,9 +565,8 @@ class PhoneCrewHeader extends StatelessWidget {
                         : (roll.loud ? t.danger : t.text2),
                   ),
                 ),
-                GestureDetector(
+                Tappable(
                   key: Key('crew-chevron-${c.id}'),
-                  behavior: HitTestBehavior.opaque,
                   onTap: onToggle,
                   child: SizedBox(
                     width: t.sp * 4,
@@ -624,30 +618,23 @@ class CrewDots extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final radius = BorderRadius.circular(t.rControl * (page ? 1 : 0.6));
-    return Semantics(
-      button: true,
-      label: label,
-      excludeSemantics: true,
-      onTap: onTap,
-      child: Material(
-        color: card || page ? Colors.transparent : t.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: page
-              ? BorderSide(color: t.border, width: t.bw)
-              : BorderSide.none,
-        ),
-        child: InkWell(
-          borderRadius: radius,
-          onTap: onTap,
-          child: SizedBox(
-            width: t.sp * (page ? 5.25 : 2.75),
-            height: t.sp * (page ? 4.5 : 2.5),
-            child: Icon(
-              LucideIcons.ellipsis,
-              size: t.codeSize,
-              color: card ? t.text3 : t.text2,
-            ),
+    return Material(
+      color: card || page ? Colors.transparent : t.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: radius,
+        side: page ? BorderSide(color: t.border, width: t.bw) : BorderSide.none,
+      ),
+      child: Tappable(
+        semanticLabel: label,
+        borderRadius: radius,
+        onTap: onTap,
+        child: SizedBox(
+          width: t.sp * (page ? 5.25 : 2.75),
+          height: t.sp * (page ? 4.5 : 2.5),
+          child: Icon(
+            LucideIcons.ellipsis,
+            size: t.codeSize,
+            color: card ? t.text3 : t.text2,
           ),
         ),
       ),
@@ -667,22 +654,20 @@ class CrewMembers extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
-      margin: EdgeInsets.only(left: t.sp * (phone ? 0.625 : 1.625)),
-      padding: EdgeInsets.only(left: t.sp * (phone ? 1.5 : 0.75)),
-      decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(color: t.border, width: t.bw),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final (i, c) in children.indexed) ...[
-            if (i > 0 && !phone) SizedBox(height: t.sp * 0.25),
-            c,
+    return Padding(
+      padding: EdgeInsets.only(left: t.sp * (phone ? 0.625 : 1.625)),
+      child: Hairline(
+        left: true,
+        padding: EdgeInsets.only(left: t.sp * (phone ? 1.5 : 0.75)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final (i, c) in children.indexed) ...[
+              if (i > 0 && !phone) SizedBox(height: t.sp * 0.25),
+              c,
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -1081,89 +1066,77 @@ class _CrewCardState extends ConsumerState<CrewCard> {
       overview: overview,
     );
     void open() => context.go(Routes.agentCrew(crew.id));
-    return GestureDetector(
-      onSecondaryTapUp: (_) => menu(),
-      child: Container(
-        key: Key('crew-card-${crew.id}'),
-        padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 2.25,
-          vertical: t.sp * 1.5,
-        ),
-        decoration: BoxDecoration(
-          color: t.surface,
-          borderRadius: BorderRadius.circular(t.rCard),
-          border: Border.all(color: t.border, width: t.bw),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Semantics(
-              button: true,
-              expanded: !collapsed,
-              label: '${crew.name}, crew, ${crewSummary(members)}',
-              excludeSemantics: true,
-              onTap: open,
-              child: GestureDetector(
-                key: Key('crew-card-header-${crew.id}'),
-                behavior: HitTestBehavior.opaque,
-                onTap: open,
-                child: Row(
-                  key: anchor,
-                  children: [
-                    // Its own row, so the name has all the room the summary
-                    // leaves rather than sharing it with a spacer.
-                    Expanded(
-                      child: Row(
-                        children: [
-                          CrewSquare(accent: crew.accent, size: t.sp * 1.5),
-                          SizedBox(width: t.sp * 1.125),
-                          Flexible(
-                            child: Text(
-                              crew.name,
-                              maxLines: 1,
-                              softWrap: false,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontFamily: StormTokens.sansFamily,
-                                fontSize: t.uiSize * 1.05,
-                                fontWeight: FontWeight.w600,
-                                color: t.text,
-                              ),
-                            ),
+    return StormCard(
+      key: Key('crew-card-${crew.id}'),
+      padding: EdgeInsets.symmetric(
+        horizontal: t.sp * 2.25,
+        vertical: t.sp * 1.5,
+      ),
+      onTap: open,
+      onSecondaryTap: menu,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Semantics(
+            key: Key('crew-card-header-${crew.id}'),
+            button: true,
+            expanded: !collapsed,
+            label: '${crew.name}, crew, ${crewSummary(members)}',
+            excludeSemantics: true,
+            onTap: open,
+            child: Row(
+              key: anchor,
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      CrewSquare(accent: crew.accent, size: t.sp * 1.5),
+                      SizedBox(width: t.sp * 1.125),
+                      Flexible(
+                        child: Text(
+                          crew.name,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: StormTokens.sansFamily,
+                            fontSize: t.uiSize * 1.05,
+                            fontWeight: FontWeight.w600,
+                            color: t.text,
                           ),
-                          SizedBox(width: t.sp * 1.125),
-                          Text(
-                            crewSummary(members),
-                            style: TextStyle(
-                              fontFamily: StormTokens.monoFamily,
-                              fontSize: t.labelSize * 1.09,
-                              color: t.text3,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
-                    ),
-                    CrewDots(
-                      key: Key('crew-card-menu-${crew.id}'),
-                      card: true,
-                      onTap: menu,
-                    ),
-                  ],
+                      SizedBox(width: t.sp * 1.125),
+                      Text(
+                        crewSummary(members),
+                        style: TextStyle(
+                          fontFamily: StormTokens.monoFamily,
+                          fontSize: t.labelSize * 1.09,
+                          color: t.text3,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
+                CrewDots(
+                  key: Key('crew-card-menu-${crew.id}'),
+                  card: true,
+                  onTap: menu,
+                ),
+              ],
             ),
-            SizedBox(height: t.sp * 0.75),
-            if (collapsed)
-              _Stacked(members: members)
-            else
-              for (final s in members)
-                CrewCardRow(
-                  session: s,
-                  host: overview.hostName(s.hostId),
-                  onTap: () => onOpenSession(s),
-                ),
-          ],
-        ),
+          ),
+          SizedBox(height: t.sp * 0.75),
+          if (collapsed)
+            _Stacked(members: members)
+          else
+            for (final s in members)
+              CrewCardRow(
+                session: s,
+                host: overview.hostName(s.hostId),
+                onTap: () => onOpenSession(s),
+              ),
+        ],
       ),
     );
   }
@@ -1192,101 +1165,96 @@ class CrewCardRow extends StatelessWidget {
     final t = context.tokens;
     final s = session;
     final radius = BorderRadius.circular(t.rControl);
-    return Semantics(
-      button: true,
-      label: sessionSpoken(s, host),
-      excludeSemantics: true,
-      onTap: onTap,
-      child: Material(
-        color: Colors.transparent,
+    return Material(
+      color: Colors.transparent,
+      borderRadius: radius,
+      child: Tappable(
+        key: Key('crew-row-${s.id}'),
+        semanticLabel: sessionSpoken(s, host),
         borderRadius: radius,
-        child: InkWell(
-          key: Key('crew-row-${s.id}'),
-          borderRadius: radius,
-          hoverColor: t.surface2,
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp,
-              vertical: t.sp * 0.875,
-            ),
-            child: Row(
-              children: [
-                AgentMark(session: s, size: t.sp * 3.5),
+        hoverColor: t.surface2,
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: t.sp,
+            vertical: t.sp * 0.875,
+          ),
+          child: Row(
+            children: [
+              AgentMark(session: s, size: t.sp * 3.5),
+              SizedBox(width: t.sp * 1.25),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, box) {
+                    final nameStyle = TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: s.ended ? t.text2 : t.text,
+                    );
+                    final subStyle = TextStyle(
+                      fontFamily: StormTokens.monoFamily,
+                      fontSize: t.labelSize * 1.09,
+                      color: t.text3,
+                    );
+                    final gap = t.sp * 1.25;
+                    // The name and role first; the sub-line takes the
+                    // rest, and keeps at least 40% when both can't fit.
+                    final natural = roleTagRowWidth(
+                      context,
+                      name: s.displayName,
+                      style: nameStyle,
+                      role: s.role,
+                      launchRole: s.launchRole,
+                    );
+                    final sub = _textWidth(
+                      context,
+                      sessionSub(s, host),
+                      subStyle,
+                    );
+                    final nameW = math.min(
+                      natural,
+                      math.max(box.maxWidth * 0.6, box.maxWidth - gap - sub),
+                    );
+                    return Row(
+                      children: [
+                        SizedBox(
+                          width: math.min(nameW, box.maxWidth),
+                          child: RoleTagRow(
+                            name: s.displayName,
+                            role: s.role,
+                            launchRole: s.launchRole,
+                            style: nameStyle,
+                          ),
+                        ),
+                        SizedBox(width: gap),
+                        Expanded(
+                          child: SessionSubLine(
+                            session: s,
+                            host: host,
+                            style: subStyle,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              if (showContext && s.context != null) ...[
+                SizedBox(width: t.sp),
+                NoteContextChip(title: s.context!.title, maxWidth: t.sp * 15),
+              ],
+              if (s.wroteCount > 0) ...[
                 SizedBox(width: t.sp * 1.25),
-                Expanded(
-                  child: LayoutBuilder(
-                    builder: (context, box) {
-                      final nameStyle = TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.uiSize,
-                        color: s.ended ? t.text2 : t.text,
-                      );
-                      final subStyle = TextStyle(
-                        fontFamily: StormTokens.monoFamily,
-                        fontSize: t.labelSize * 1.09,
-                        color: t.text3,
-                      );
-                      final gap = t.sp * 1.25;
-                      // The name and role first; the sub-line takes the
-                      // rest, and keeps at least 40% when both can't fit.
-                      final natural = roleTagRowWidth(
-                        context,
-                        name: s.displayName,
-                        style: nameStyle,
-                        role: s.role,
-                        launchRole: s.launchRole,
-                      );
-                      final sub = _textWidth(
-                        context,
-                        sessionSub(s, host),
-                        subStyle,
-                      );
-                      final nameW = math.min(
-                        natural,
-                        math.max(box.maxWidth * 0.6, box.maxWidth - gap - sub),
-                      );
-                      return Row(
-                        children: [
-                          SizedBox(
-                            width: math.min(nameW, box.maxWidth),
-                            child: RoleTagRow(
-                              name: s.displayName,
-                              role: s.role,
-                              launchRole: s.launchRole,
-                              style: nameStyle,
-                            ),
-                          ),
-                          SizedBox(width: gap),
-                          Expanded(
-                            child: SessionSubLine(
-                              session: s,
-                              host: host,
-                              style: subStyle,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
+                Text(
+                  'wrote ${s.wroteCount}',
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize,
+                    color: t.accent,
                   ),
                 ),
-                if (showContext && s.context != null) ...[
-                  SizedBox(width: t.sp),
-                  NoteContextChip(title: s.context!.title, maxWidth: t.sp * 15),
-                ],
-                if (s.wroteCount > 0) ...[
-                  SizedBox(width: t.sp * 1.25),
-                  Text(
-                    'wrote ${s.wroteCount}',
-                    style: TextStyle(
-                      fontFamily: StormTokens.monoFamily,
-                      fontSize: t.labelSize,
-                      color: t.accent,
-                    ),
-                  ),
-                ],
               ],
-            ),
+            ],
           ),
         ),
       ),
@@ -1484,9 +1452,8 @@ class CrewsSectionLabel extends StatelessWidget {
       label: 'Crews, $count',
       excludeSemantics: true,
       onTap: onTap,
-      child: GestureDetector(
+      child: Tappable(
         key: const Key('crews-section'),
-        behavior: HitTestBehavior.opaque,
         onTap: onTap,
         child: Padding(
           padding: phone
@@ -1549,9 +1516,8 @@ class EndedLabel extends StatelessWidget {
               label: 'Ended, $count',
               excludeSemantics: true,
               onTap: onToggle,
-              child: GestureDetector(
+              child: Tappable(
                 key: const Key('ended-toggle'),
-                behavior: HitTestBehavior.opaque,
                 onTap: onToggle,
                 child: Row(
                   children: [
@@ -1570,17 +1536,12 @@ class EndedLabel extends StatelessWidget {
             ),
           ),
           if (onDismissAll != null)
-            Semantics(
-              button: true,
-              label: 'Dismiss all ended',
-              excludeSemantics: true,
+            TextAction(
+              key: const Key('ended-dismiss-all'),
+              label: 'Dismiss all',
+              semanticLabel: 'Dismiss all ended',
+              mono: true,
               onTap: onDismissAll,
-              child: GestureDetector(
-                key: const Key('ended-dismiss-all'),
-                behavior: HitTestBehavior.opaque,
-                onTap: onDismissAll,
-                child: Text('Dismiss all', style: agentMono(t, color: t.text2)),
-              ),
             ),
         ],
       ),
