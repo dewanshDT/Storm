@@ -1,13 +1,19 @@
 import 'dart:io';
 
-/// The files in `lib/ui/` whose public widgets are the shared components.
-/// Keep in step with the coverage test's own list.
+/// What "shared" means: the client's generic building blocks, not its screens
+/// or the widgets that belong to one feature. Paths are relative to the
+/// client's `lib/`. The coverage test reads this same list.
 const sharedFiles = [
   'ui/controls.dart',
   'ui/widgets.dart',
   'ui/surfaces.dart',
   'ui/panels.dart',
   'ui/states.dart',
+  'ui/session_status.dart',
+  'ui/accents.dart',
+  'ui/icons.dart',
+  'ui/settings/settings_widgets.dart',
+  'ui/shell/sidebar_rows.dart',
 ];
 
 /// The gallery instantiates every component by design, so it is not usage.

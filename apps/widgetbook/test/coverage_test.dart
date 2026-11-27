@@ -2,20 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// What "shared" means: the client's generic building blocks, not its screens
-/// or the widgets that belong to one feature. Paths are relative to the client.
-const _shared = [
-  'controls.dart',
-  'widgets.dart',
-  'surfaces.dart',
-  'panels.dart',
-  'states.dart',
-  'session_status.dart',
-  'accents.dart',
-  'icons.dart',
-  'settings/settings_widgets.dart',
-  'shell/sidebar_rows.dart',
-];
+import '../tool/ui_usage.dart' show sharedFiles;
 
 /// Shared widgets that cannot be rendered on their own, with why.
 const _allowed = <String, String>{
@@ -39,8 +26,8 @@ Set<String> _names(String source, RegExp pattern) =>
 
 void main() {
   final shared = <String>{
-    for (final file in _shared)
-      ..._names(File('../client/lib/ui/$file').readAsStringSync(), _widget),
+    for (final file in sharedFiles)
+      ..._names(File('../client/lib/$file').readAsStringSync(), _widget),
   };
   final covered = <String>{
     for (final file in Directory('lib/use_cases').listSync().whereType<File>())
