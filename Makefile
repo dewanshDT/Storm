@@ -85,7 +85,7 @@ fmt-check:
 	cd $(ISOLATION) && cargo fmt --check
 	cd $(DIAG) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
-	cd $(WIDGETBOOK) && dart format --set-exit-if-changed lib test
+	cd $(WIDGETBOOK) && dart format --set-exit-if-changed lib test tool
 
 ## lint: clippy + dart analyze, all must be clean
 lint:
@@ -194,10 +194,11 @@ test-client:
 ## test-widgetbook: the catalogue's smoke tests, and its generated directory is up to date
 #
 # `lib/main.directories.g.dart` is committed so nothing else needs build_runner;
-# regenerating it here and checking the diff is what keeps it honest.
-test-widgetbook: widgetbook-codegen
-	@git diff --exit-code -- $(WIDGETBOOK)/lib/main.directories.g.dart || { \
-		echo "$(WIDGETBOOK)/lib/main.directories.g.dart is stale; commit the regenerated file" >&2; \
+# regenerating it here and checking the diff is what keeps it honest. The usage
+# index (`lib/usage.g.dart`) is regenerated from the client's source the same way.
+test-widgetbook: widgetbook-codegen widgetbook-usage
+	@git diff --exit-code -- $(WIDGETBOOK)/lib/main.directories.g.dart $(WIDGETBOOK)/lib/usage.g.dart || { \
+		echo "a generated file under $(WIDGETBOOK)/lib is stale; commit the regenerated file" >&2; \
 		exit 1; }
 	cd $(WIDGETBOOK) && flutter test
 
@@ -438,7 +439,7 @@ fmt:
 	cd $(ISOLATION) && cargo fmt
 	cd $(DIAG) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
-	cd $(WIDGETBOOK) && dart format lib test
+	cd $(WIDGETBOOK) && dart format lib test tool
 
 # ---- running --------------------------------------------------------
 
@@ -616,6 +617,10 @@ widgetbook-web:
 widgetbook-codegen:
 	cd $(WIDGETBOOK) && dart run build_runner build
 
+## widgetbook-usage: regenerate the catalogue's usage index (where each shared component and each one-off control is used)
+widgetbook-usage:
+	cd $(WIDGETBOOK) && dart tool/ui_usage.dart && dart format lib/usage.g.dart
+
 ## www: build the marketing site (apps/www → dist)
 www:
 	cd $(WWW) && npm ci && npm run build
@@ -668,7 +673,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-widgetbook widgetbook widgetbook-web widgetbook-codegen test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf test-diag test-feedback-sync relay-conformance relay-conformance-local relay-conformance-cf test-client test-widgetbook widgetbook widgetbook-web widgetbook-codegen widgetbook-usage test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check test-release-channel test-apt-repo-build \
         build-server deploy deploy-check

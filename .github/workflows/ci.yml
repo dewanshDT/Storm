@@ -550,10 +550,11 @@ jobs:
           key: widgetbook-sqlite3-${{ runner.os }}-${{ hashFiles('apps/widgetbook/pubspec.lock') }}
           restore-keys: widgetbook-sqlite3-${{ runner.os }}-
       - run: flutter pub get
-      - run: dart format --set-exit-if-changed lib test
+      - run: dart format --set-exit-if-changed lib test tool
       - run: flutter analyze
       - run: dart run build_runner build
-      - run: git diff --exit-code -- lib/main.directories.g.dart
+      - run: dart tool/ui_usage.dart && dart format lib/usage.g.dart
+      - run: git diff --exit-code -- lib/main.directories.g.dart lib/usage.g.dart
       - run: flutter test
 
   # The desktop runners are native code the Dart suite never compiles
