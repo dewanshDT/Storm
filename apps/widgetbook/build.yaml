@@ -1,0 +1,7 @@
+targets:
+  $default:
+    builders:
+      # Reports a hash of the committer's git email upstream; off by default
+      # here since it has no use for the catalogue.
+      widgetbook_generator:telemetry:
+        enabled: false

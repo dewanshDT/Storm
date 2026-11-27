@@ -1,0 +1,47 @@
+name: storm_widgetbook
+description: "Component catalogue for Storm's shared UI (decision 164)."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  storm:
+    path: ../client
+  widgetbook: ^3.0.0
+  widgetbook_annotation: ^3.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.15.1
+  widgetbook_generator: ^3.0.0
+
+flutter:
+  uses-material-design: true
+
+  # The client's families are declared in its own pubspec, which a path
+  # dependency does not carry over to `TextStyle(fontFamily: ...)`: the files
+  # have to be re-declared here from the client's own folder.
+  fonts:
+    - family: Newsreader
+      fonts:
+        - asset: ../client/assets/fonts/Newsreader.ttf
+        - asset: ../client/assets/fonts/Newsreader-Italic.ttf
+          style: italic
+    - family: IBMPlexSans
+      fonts:
+        - asset: ../client/assets/fonts/IBMPlexSans-Regular.ttf
+        - asset: ../client/assets/fonts/IBMPlexSans-Medium.ttf
+          weight: 500
+        - asset: ../client/assets/fonts/IBMPlexSans-SemiBold.ttf
+          weight: 600
+    - family: IBMPlexMono
+      fonts:
+        - asset: ../client/assets/fonts/IBMPlexMono-Regular.ttf
+        - asset: ../client/assets/fonts/IBMPlexMono-Medium.ttf
+          weight: 500
