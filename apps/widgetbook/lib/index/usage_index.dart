@@ -121,7 +121,7 @@ class _Page extends StatelessWidget {
   }
 }
 
-class _Group extends StatelessWidget {
+class _Group extends StatefulWidget {
   const _Group({
     required this.title,
     required this.count,
@@ -137,33 +137,52 @@ class _Group extends StatelessWidget {
   final bool highlight;
 
   @override
+  State<_Group> createState() => _GroupState();
+}
+
+class _GroupState extends State<_Group> {
+  bool _open = false;
+
+  @override
   Widget build(BuildContext context) {
-    final t = tokens;
+    final t = widget.tokens;
     final style = TextStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: t.codeSize,
       color: t.text,
     );
+    final canOpen = widget.lines.isNotEmpty;
     return ColoredBox(
-      color: highlight ? t.amberSoft : t.bg,
-      child: ExpansionTile(
-        enabled: lines.isNotEmpty,
-        title: Text(title, style: style),
-        trailing: CountBadge(
-          count: count,
-          color: highlight ? t.amber : t.accent,
-        ),
+      color: widget.highlight ? t.amberSoft : t.bg,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Align(
-            alignment: Alignment.centerLeft,
+          InkWell(
+            onTap: canOpen ? () => setState(() => _open = !_open) : null,
             child: Padding(
-              padding: EdgeInsets.only(left: t.sp * 2, bottom: t.sp),
-              child: SelectableText(
-                lines.join('\n'),
-                style: style.copyWith(color: t.text2),
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp,
+                vertical: t.sp * 0.75,
+              ),
+              child: Row(
+                children: [
+                  Expanded(child: Text(widget.title, style: style)),
+                  CountBadge(
+                    count: widget.count,
+                    color: widget.highlight ? t.amber : t.accent,
+                  ),
+                ],
               ),
             ),
           ),
+          if (_open)
+            Padding(
+              padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp, t.sp),
+              child: SelectableText(
+                widget.lines.join('\n'),
+                style: style.copyWith(color: t.text2),
+              ),
+            ),
         ],
       ),
     );
