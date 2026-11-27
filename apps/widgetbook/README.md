@@ -34,6 +34,17 @@ build_runner; `make test-widgetbook` (part of `make check`) fails if it is
 stale. A use case that needs app state belongs on a component that takes its
 state as inputs, not on a stub of the app.
 
+## Coverage gate
+
+`test/coverage_test.dart` fails when a public widget in the client's shared
+files has no use case. "Shared" is the `_shared` list at the top of that test
+(`controls.dart`, `widgets.dart`, `surfaces.dart`, `panels.dart`, `states.dart`
+and a few other building-block files); screens and one-feature widgets are not
+in it. To exempt a widget that cannot render on its own, add it to the
+`_allowed` map with the reason; the test also fails when an entry goes stale
+(the widget is gone, or now has a use case). A new shared file goes in
+`_shared`.
+
 ## Notes
 
 - Fonts are re-declared in `pubspec.yaml` from `../client/assets/fonts/`: a
@@ -42,4 +53,6 @@ state as inputs, not on a stub of the app.
   versions (`flutter_lucide` removes icon names across minor releases). Copy
   the client's lock over it and run `flutter pub get` after the client's
   dependencies change.
+- `assets/` is a link to `../client/assets`, declared in `pubspec.yaml` for the
+  one image the client loads without a `package:` prefix (the brand mark).
 - The generator's telemetry builder is switched off in `build.yaml`.
