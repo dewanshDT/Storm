@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'icons.dart';
+import 'tappable.dart';
 import 'tokens.dart';
 
 /// A note in a list: title and one metadata line.
@@ -228,7 +229,11 @@ class Breadcrumb extends StatelessWidget {
       children.add(
         crumb.onTap == null
             ? label
-            : GestureDetector(onTap: crumb.onTap, child: label),
+            : Tappable(
+                semanticLabel: crumb.label,
+                onTap: crumb.onTap,
+                child: label,
+              ),
       );
     }
 

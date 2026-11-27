@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart' show TextInputFormatter;
 
+import 'tappable.dart';
 import 'tokens.dart';
 
 /// A themed text field. Never sets a border: passing one discards the fill,
@@ -93,20 +94,24 @@ class StormCheckbox extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.size,
+    this.semanticLabel,
   });
 
   final bool value;
   final ValueChanged<bool>? onChanged;
   final double? size;
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final side = size ?? t.sp * 2.25;
 
-    return GestureDetector(
+    return Tappable(
+      checked: value,
+      semanticLabel: semanticLabel,
+      borderRadius: BorderRadius.circular(t.rInner),
       onTap: onChanged == null ? null : () => onChanged!(!value),
-      behavior: HitTestBehavior.opaque,
       child: Container(
         width: side,
         height: side,
@@ -164,28 +169,30 @@ class StormCheckboxRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final live = onChanged != null;
-    return Semantics(
-      checked: value,
-      enabled: live,
-      child: Opacity(
-        opacity: live ? 1 : 0.5,
-        child: InkWell(
-          onTap: live ? () => onChanged!(!value) : null,
-          borderRadius: borderRadius ?? BorderRadius.circular(t.rChip),
-          child: Padding(
-            padding: padding ?? EdgeInsets.symmetric(vertical: t.sp * 0.5),
-            child: Row(
-              children: [
-                StormCheckbox(
-                  key: checkboxKey,
-                  value: value,
-                  size: checkboxSize,
-                  onChanged: onChanged,
+    return Opacity(
+      opacity: live ? 1 : 0.5,
+      child: Tappable(
+        checked: value,
+        borderRadius: borderRadius ?? BorderRadius.circular(t.rChip),
+        minHitSize: 0,
+        onTap: live ? () => onChanged!(!value) : null,
+        child: Padding(
+          padding: padding ?? EdgeInsets.symmetric(vertical: t.sp * 0.5),
+          child: Row(
+            children: [
+              ExcludeFocus(
+                child: IgnorePointer(
+                  child: StormCheckbox(
+                    key: checkboxKey,
+                    value: value,
+                    size: checkboxSize,
+                    onChanged: onChanged,
+                  ),
                 ),
-                SizedBox(width: t.sp),
-                Expanded(child: child),
-              ],
-            ),
+              ),
+              SizedBox(width: t.sp),
+              Expanded(child: child),
+            ],
           ),
         ),
       ),

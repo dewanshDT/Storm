@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'tappable.dart';
 import 'tokens.dart';
 
 enum StormButtonKind { primary, outline, soft, danger, text, dangerText }
@@ -192,50 +193,47 @@ class StormToggle extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.enabled = true,
+    this.semanticLabel,
   });
 
   final bool value;
   final ValueChanged<bool>? onChanged;
   final bool enabled;
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final live = enabled && onChanged != null;
 
-    return Semantics(
+    return Tappable(
       toggled: value,
-      enabled: live,
+      semanticLabel: semanticLabel,
+      borderRadius: BorderRadius.circular(t.rPill),
+      onTap: live ? () => onChanged!(!value) : null,
       child: Opacity(
         opacity: live ? 1 : 0.5,
-        child: GestureDetector(
-          onTap: live ? () => onChanged!(!value) : null,
-          behavior: HitTestBehavior.opaque,
-          child: AnimatedContainer(
+        child: AnimatedContainer(
+          duration: t.durationOf(context),
+          curve: t.curve,
+          width: t.sp * 4.75,
+          height: t.sp * 2.75,
+          padding: EdgeInsets.all(t.sp * 0.25 - t.bw),
+          decoration: BoxDecoration(
+            color: value ? t.accent : t.surface2,
+            borderRadius: BorderRadius.circular(t.rPill),
+            border: Border.all(color: value ? t.accent : t.border, width: t.bw),
+          ),
+          child: AnimatedAlign(
             duration: t.durationOf(context),
             curve: t.curve,
-            width: t.sp * 4.75,
-            height: t.sp * 2.75,
-            padding: EdgeInsets.all(t.sp * 0.25 - t.bw),
-            decoration: BoxDecoration(
-              color: value ? t.accent : t.surface2,
-              borderRadius: BorderRadius.circular(t.rPill),
-              border: Border.all(
-                color: value ? t.accent : t.border,
-                width: t.bw,
-              ),
-            ),
-            child: AnimatedAlign(
-              duration: t.durationOf(context),
-              curve: t.curve,
-              alignment: value ? Alignment.centerRight : Alignment.centerLeft,
-              child: Container(
-                width: t.sp * 2,
-                height: t.sp * 2,
-                decoration: BoxDecoration(
-                  color: value ? t.onAccent : t.text3,
-                  shape: BoxShape.circle,
-                ),
+            alignment: value ? Alignment.centerRight : Alignment.centerLeft,
+            child: Container(
+              width: t.sp * 2,
+              height: t.sp * 2,
+              decoration: BoxDecoration(
+                color: value ? t.onAccent : t.text3,
+                shape: BoxShape.circle,
               ),
             ),
           ),

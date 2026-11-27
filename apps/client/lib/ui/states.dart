@@ -278,7 +278,8 @@ class ConflictCard extends StatelessWidget {
                 ),
               ),
               if (onDismiss != null)
-                InkWell(
+                Tappable(
+                  semanticLabel: 'Dismiss',
                   onTap: onDismiss,
                   child: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
                 ),

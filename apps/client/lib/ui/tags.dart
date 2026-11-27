@@ -308,35 +308,30 @@ class IconBadgeButton extends StatelessWidget {
     final t = context.tokens;
     final side = dimension ?? t.sp * 3.5;
     final spoken = count == 0 ? tooltip : '$tooltip, $count unread';
-    return Semantics(
-      button: true,
-      label: spoken,
+    return Tappable(
+      semanticLabel: spoken,
+      borderRadius: BorderRadius.circular(t.rControl),
       onTap: onTap,
-      excludeSemantics: true,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(t.rControl),
-        onTap: onTap,
-        child: SizedBox.square(
-          key: anchorKey,
-          dimension: side,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Center(
-                child: Icon(icon, size: t.uiSize, color: t.text2),
-              ),
-              if (count > 0)
-                Positioned(
-                  top: -t.sp * 0.25,
-                  right: -t.sp * 0.375,
-                  child: CountBadge(
-                    count: count,
-                    color: badgeColor ?? t.danger,
-                    small: smallBadge,
-                  ),
+      child: SizedBox.square(
+        key: anchorKey,
+        dimension: side,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Center(
+              child: Icon(icon, size: t.uiSize, color: t.text2),
+            ),
+            if (count > 0)
+              Positioned(
+                top: -t.sp * 0.25,
+                right: -t.sp * 0.375,
+                child: CountBadge(
+                  count: count,
+                  color: badgeColor ?? t.danger,
+                  small: smallBadge,
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );

@@ -37,7 +37,7 @@ const componentUsage = <String, List<UsageSite>>{
   'CodeBlock': [UsageSite('ui/report_sheet.dart', 199)],
   'ConflictCard': [UsageSite('ui/note_editor.dart', 350)],
   'CountBadge': [
-    UsageSite('ui/notifications.dart', 55),
+    UsageSite('ui/notifications.dart', 56),
     UsageSite('ui/shell/activity_rail.dart', 278),
     UsageSite('ui/shell/corner_bubbles.dart', 330),
   ],
@@ -131,7 +131,7 @@ const componentUsage = <String, List<UsageSite>>{
   ],
   'MonoTag': [
     UsageSite('agent/agents_screen.dart', 516),
-    UsageSite('ui/settings/settings_widgets.dart', 483),
+    UsageSite('ui/settings/settings_widgets.dart', 479),
   ],
   'MonoValue': [
     UsageSite('ui/settings/advanced_page.dart', 50),
@@ -195,7 +195,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('agent/agents_hosts_parts.dart', 1056),
     UsageSite('agent/agents_hosts_parts.dart', 1908),
     UsageSite('agent/agents_screen.dart', 700),
-    UsageSite('ui/settings/settings_widgets.dart', 67),
+    UsageSite('ui/settings/settings_widgets.dart', 68),
   ],
   'RowActions': [
     UsageSite('agent/agents_hosts_parts.dart', 1644),
@@ -443,7 +443,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/lan_servers.dart', 633),
     UsageSite('ui/lan_servers.dart', 705),
     UsageSite('ui/lan_servers.dart', 776),
-    UsageSite('ui/media.dart', 187),
+    UsageSite('ui/media.dart', 189),
     UsageSite('ui/note_header.dart', 27),
     UsageSite('ui/pairing_screen.dart', 485),
     UsageSite('ui/pairing_screen.dart', 493),
@@ -479,7 +479,7 @@ const componentUsage = <String, List<UsageSite>>{
     UsageSite('ui/report_sheet.dart', 362),
   ],
   'StormIcon': [
-    UsageSite('ui/rows.dart', 148),
+    UsageSite('ui/rows.dart', 149),
     UsageSite('ui/shell/vault_sidebar.dart', 214),
   ],
   'StormInput': [
@@ -547,7 +547,20 @@ const componentUsage = <String, List<UsageSite>>{
   ],
   'TagChip': [UsageSite('ui/tags_panel.dart', 117)],
   'TagGroup': [UsageSite('ui/tags_panel.dart', 76)],
-  'Tappable': [UsageSite('ui/cards.dart', 73), UsageSite('ui/tags.dart', 103)],
+  'Tappable': [
+    UsageSite('ui/accents.dart', 188),
+    UsageSite('ui/buttons.dart', 209),
+    UsageSite('ui/cards.dart', 73),
+    UsageSite('ui/inputs.dart', 110),
+    UsageSite('ui/inputs.dart', 174),
+    UsageSite('ui/media.dart', 108),
+    UsageSite('ui/notifications.dart', 80),
+    UsageSite('ui/rows.dart', 232),
+    UsageSite('ui/settings/settings_widgets.dart', 188),
+    UsageSite('ui/states.dart', 281),
+    UsageSite('ui/tags.dart', 103),
+    UsageSite('ui/tags.dart', 311),
+  ],
   'TextAction': [
     UsageSite('agent/agents_hosts_parts.dart', 635),
     UsageSite('agent/agents_hosts_parts.dart', 644),

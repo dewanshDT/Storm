@@ -9,6 +9,7 @@ import '../breakpoints.dart';
 import '../panels.dart' show MonoTag;
 import '../shell/storm_scaffold.dart';
 import '../shell/app_bar.dart' show pageTopInset;
+import '../tappable.dart';
 import '../tokens.dart';
 import '../widgets.dart' show ReadingMeasure;
 
@@ -184,23 +185,18 @@ class TextAction extends StatelessWidget {
         : accent
         ? t.accent
         : t.text2;
-    return Semantics(
-      button: true,
-      label: label,
+    return Tappable(
+      semanticLabel: label,
       onTap: onTap,
-      excludeSemantics: true,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rChip),
-        child: Padding(
-          padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: large ? t.uiSize : t.codeSize,
-              color: onTap == null ? t.text3 : color,
-            ),
+      borderRadius: BorderRadius.circular(t.rChip),
+      child: Padding(
+        padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: large ? t.uiSize : t.codeSize,
+            color: onTap == null ? t.text3 : color,
           ),
         ),
       ),

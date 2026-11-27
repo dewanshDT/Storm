@@ -6,6 +6,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'clipboard_copy.dart';
 import 'controls.dart' show StormButton;
+import 'tappable.dart';
 import 'tokens.dart';
 
 /// The product mark.
@@ -104,9 +105,10 @@ class ImageThumbnail extends StatelessWidget {
             child: Material(
               color: t.surface.withValues(alpha: 0.85),
               shape: const CircleBorder(),
-              child: InkWell(
+              child: Tappable(
+                semanticLabel: 'Remove',
                 onTap: onRemove,
-                customBorder: const CircleBorder(),
+                borderRadius: BorderRadius.circular(t.sp * 2),
                 child: Padding(
                   padding: EdgeInsets.all(t.sp * 0.375),
                   child: Icon(

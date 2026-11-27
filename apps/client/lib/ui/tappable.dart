@@ -26,6 +26,8 @@ class Tappable extends StatefulWidget {
     this.borderRadius,
     this.minHitSize,
     this.focusRing = true,
+    this.toggled,
+    this.checked,
   });
 
   final Widget child;
@@ -41,6 +43,12 @@ class Tappable extends StatefulWidget {
   /// Overrides the platform minimum; 0 turns the padding off.
   final double? minHitSize;
   final bool focusRing;
+
+  /// Switch semantics; the control is then not announced as a button.
+  final bool? toggled;
+
+  /// Checkbox semantics.
+  final bool? checked;
 
   @override
   State<Tappable> createState() => _TappableState();
@@ -104,7 +112,9 @@ class _TappableState extends State<Tappable> {
     );
 
     out = Semantics(
-      button: true,
+      button: widget.toggled == null && widget.checked == null,
+      toggled: widget.toggled,
+      checked: widget.checked,
       enabled: live,
       label: widget.semanticLabel,
       onTap: widget.onTap,

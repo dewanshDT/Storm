@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'oklch.dart';
+import 'tappable.dart';
 import 'tokens.dart';
 
 /// The colours a note or a vault can be tinted with.
@@ -184,9 +185,10 @@ class AccentSwatch extends StatelessWidget {
 
     return Tooltip(
       message: accent.label,
-      child: InkWell(
+      child: Tappable(
+        semanticLabel: accent.label,
         onTap: onTap,
-        customBorder: const CircleBorder(),
+        borderRadius: BorderRadius.circular(size),
         child: Container(
           width: size,
           height: size,

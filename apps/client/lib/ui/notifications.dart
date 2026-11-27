@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'tags.dart';
+import 'tappable.dart';
 import 'tokens.dart';
 
 /// A panel's header: a title at `bodySize`/semibold — a compact popover's
@@ -76,21 +77,16 @@ class _RowMenuButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Semantics(
-      button: true,
-      label: 'More actions',
-      excludeSemantics: true,
+    return Tappable(
+      semanticLabel: 'More actions',
       onTap: onTap,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rChip),
-        child: Padding(
-          padding: EdgeInsets.all(t.sp * 0.375),
-          child: Icon(
-            LucideIcons.ellipsis,
-            size: t.labelSize * 1.2,
-            color: t.text2,
-          ),
+      borderRadius: BorderRadius.circular(t.rChip),
+      child: Padding(
+        padding: EdgeInsets.all(t.sp * 0.375),
+        child: Icon(
+          LucideIcons.ellipsis,
+          size: t.labelSize * 1.2,
+          color: t.text2,
         ),
       ),
     );

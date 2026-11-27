@@ -530,7 +530,7 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
           left: t.cardPad,
           right: t.cardPad,
           top: t.cardPad,
-          bottom: MediaQuery.of(context).viewInsets.bottom + t.cardPad,
+          bottom: MediaQuery.viewInsetsOf(context).bottom + t.cardPad,
         ),
         child: SingleChildScrollView(child: body),
       ),
