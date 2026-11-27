@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'tokens.dart';
 
-enum StormButtonKind { primary, outline, soft, danger, text }
+enum StormButtonKind { primary, outline, soft, danger, text, dangerText }
 
 class StormButton extends StatelessWidget {
   const StormButton({
@@ -15,6 +15,7 @@ class StormButton extends StatelessWidget {
     this.kind = StormButtonKind.primary,
     this.icon,
     this.expand = false,
+    this.color,
   });
 
   const StormButton.primary({
@@ -95,15 +96,20 @@ class StormButton extends StatelessWidget {
   final IconData? icon;
   final bool expand;
 
+  /// Replaces the kind's own colour: the fill for primary and danger, the
+  /// ink for the others.
+  final Color? color;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final (fill, ink, stroke) = switch (kind) {
-      StormButtonKind.primary => (t.accent, t.onAccent, null),
-      StormButtonKind.outline => (null, t.text, t.border),
-      StormButtonKind.soft => (t.accentSoft, t.accent, null),
-      StormButtonKind.danger => (t.danger, t.onAccent, null),
-      StormButtonKind.text => (null, t.text2, null),
+      StormButtonKind.primary => (color ?? t.accent, t.onAccent, null),
+      StormButtonKind.outline => (null, color ?? t.text, t.border),
+      StormButtonKind.soft => (t.accentSoft, color ?? t.accent, null),
+      StormButtonKind.danger => (color ?? t.danger, t.onAccent, null),
+      StormButtonKind.text => (null, color ?? t.text2, null),
+      StormButtonKind.dangerText => (null, color ?? t.danger, null),
     };
     final padding = switch (kind) {
       StormButtonKind.primary || StormButtonKind.danger => EdgeInsets.symmetric(
@@ -118,13 +124,13 @@ class StormButton extends StatelessWidget {
         horizontal: t.sp * 1.375,
         vertical: t.sp * 0.75,
       ),
-      StormButtonKind.text => EdgeInsets.symmetric(
-        horizontal: t.sp * 0.5,
-        vertical: t.sp * 0.5,
-      ),
+      StormButtonKind.text || StormButtonKind.dangerText =>
+        EdgeInsets.symmetric(horizontal: t.sp * 0.5, vertical: t.sp * 0.5),
     };
     final weight =
-        kind == StormButtonKind.outline || kind == StormButtonKind.text
+        kind == StormButtonKind.outline ||
+            kind == StormButtonKind.text ||
+            kind == StormButtonKind.dangerText
         ? FontWeight.w400
         : FontWeight.w500;
     final radius = BorderRadius.circular(t.rControl);

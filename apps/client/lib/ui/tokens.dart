@@ -570,3 +570,17 @@ extension StormTokensOf on BuildContext {
         );
   }
 }
+
+enum StormDensity { compact, regular, comfortable }
+
+enum StormTone { neutral, accent, danger, warning, success }
+
+extension StormToneColor on StormTone {
+  Color color(StormTokens t) => switch (this) {
+    StormTone.neutral => t.text3,
+    StormTone.accent => t.accent,
+    StormTone.danger => t.danger,
+    StormTone.warning => t.amber,
+    StormTone.success => t.green,
+  };
+}

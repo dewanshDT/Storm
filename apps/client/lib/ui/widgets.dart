@@ -5,6 +5,7 @@
 /// The Widgetbook catalogue (`apps/widgetbook`) renders the whole set.
 library;
 
+export 'cards.dart';
 export 'inputs.dart';
 export 'media.dart';
 export 'notifications.dart';
@@ -12,3 +13,4 @@ export 'popover.dart';
 export 'rows.dart';
 export 'status.dart';
 export 'tags.dart';
+export 'tappable.dart';
