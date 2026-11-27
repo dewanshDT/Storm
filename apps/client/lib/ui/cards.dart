@@ -16,6 +16,7 @@ class StormCard extends StatelessWidget {
     this.radius,
     this.border = true,
     this.borderColor,
+    this.borderWidth,
     this.clip = false,
     this.onTap,
     this.onSecondaryTap,
@@ -36,6 +37,9 @@ class StormCard extends StatelessWidget {
 
   /// `t.border` by default.
   final Color? borderColor;
+
+  /// `t.bw` by default.
+  final double? borderWidth;
   final bool clip;
   final VoidCallback? onTap;
   final VoidCallback? onSecondaryTap;
@@ -52,7 +56,7 @@ class StormCard extends StatelessWidget {
           StormDensity.comfortable => t.sp * 2,
         });
     final side = border
-        ? BorderSide(color: borderColor ?? t.border, width: t.bw)
+        ? BorderSide(color: borderColor ?? t.border, width: borderWidth ?? t.bw)
         : BorderSide.none;
     if (onTap == null && onSecondaryTap == null) {
       return Container(
@@ -76,6 +80,43 @@ class StormCard extends StatelessWidget {
         borderRadius: r,
         child: Padding(padding: inset, child: child),
       ),
+    );
+  }
+}
+
+/// A notice in a flow: a [StormCard] on `surface2` and the control radius.
+class NoticeBanner extends StatelessWidget {
+  const NoticeBanner({
+    super.key,
+    required this.child,
+    this.color,
+    this.borderColor,
+    this.borderWidth,
+    this.padding,
+  });
+
+  final Widget child;
+
+  /// `t.surface2` by default.
+  final Color? color;
+  final Color? borderColor;
+  final double? borderWidth;
+
+  /// `2 sp` across, `1.5 sp` down, by default.
+  final EdgeInsetsGeometry? padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return StormCard(
+      color: color ?? t.surface2,
+      radius: t.rControl,
+      borderColor: borderColor,
+      borderWidth: borderWidth,
+      padding:
+          padding ??
+          EdgeInsets.symmetric(horizontal: t.sp * 2, vertical: t.sp * 1.5),
+      child: child,
     );
   }
 }

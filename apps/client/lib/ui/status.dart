@@ -12,9 +12,22 @@ import 'tokens.dart';
 /// else, grey is offline and inactive, amber is work in progress, and red is
 /// a server that answered without proving who it is.
 class StatusDot extends StatelessWidget {
-  const StatusDot({super.key, required this.status, this.size = 8, this.ring});
+  const StatusDot({
+    super.key,
+    this.status,
+    this.color,
+    this.hollow = false,
+    this.size = 8,
+    this.ring,
+  }) : assert(status != null || color != null);
 
-  final DotStatus status;
+  final DotStatus? status;
+
+  /// Replaces the status colour, for a dot whose meaning is not a sync state.
+  final Color? color;
+
+  /// A ring in the dot's colour instead of a fill.
+  final bool hollow;
   final double size;
 
   /// The ground to punch the dot out of where it overlaps something — the
@@ -24,19 +37,24 @@ class StatusDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: switch (status) {
+    final ink =
+        color ??
+        switch (status!) {
           DotStatus.synced => t.green,
           DotStatus.syncing => t.amber,
           DotStatus.offline || DotStatus.serverOffline => t.text3,
           DotStatus.untrusted => t.danger,
           DotStatus.relayed => t.accent,
-        },
-        border: ring == null
+        };
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: hollow ? null : ink,
+        border: hollow
+            ? Border.all(color: ink, width: t.bw * 1.5)
+            : ring == null
             ? null
             : Border.all(color: ring!, width: t.bw * 1.5),
       ),

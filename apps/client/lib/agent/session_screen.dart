@@ -1763,7 +1763,9 @@ class PluginProblem extends StatelessWidget {
         children: [
           Text(line, style: agentSans(t, color: t.text3)),
           SizedBox(height: t.sp * 0.5),
-          AccentLink(
+          TextAction(
+            accent: true,
+            lineHeight: 1.4,
             key: const Key('fix-in-integrations'),
             label: 'Fix in Integrations ›',
             onTap: () => context.go(Routes.integrations),

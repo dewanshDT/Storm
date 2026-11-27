@@ -43,6 +43,8 @@ import 'package:storm_widgetbook/use_cases/kind_badge.dart'
     as _storm_widgetbook_use_cases_kind_badge;
 import 'package:storm_widgetbook/use_cases/note_row.dart'
     as _storm_widgetbook_use_cases_note_row;
+import 'package:storm_widgetbook/use_cases/notice_banner.dart'
+    as _storm_widgetbook_use_cases_notice_banner;
 import 'package:storm_widgetbook/use_cases/notification_row.dart'
     as _storm_widgetbook_use_cases_notification_row;
 import 'package:storm_widgetbook/use_cases/numbered_steps.dart'
@@ -1045,6 +1047,21 @@ final directories = <_widgetbook.WidgetbookNode>[
         ],
       ),
       _widgetbook.WidgetbookComponent(
+        name: 'NoticeBanner',
+        useCases: [
+          _widgetbook.WidgetbookUseCase(
+            name: 'default',
+            builder:
+                _storm_widgetbook_use_cases_notice_banner.noticeBannerDefault,
+          ),
+          _widgetbook.WidgetbookUseCase(
+            name: 'warning and strong',
+            builder:
+                _storm_widgetbook_use_cases_notice_banner.noticeBannerTones,
+          ),
+        ],
+      ),
+      _widgetbook.WidgetbookComponent(
         name: 'NotificationGroupRow',
         useCases: [
           _widgetbook.WidgetbookUseCase(
@@ -1219,6 +1236,10 @@ final directories = <_widgetbook.WidgetbookNode>[
       _widgetbook.WidgetbookComponent(
         name: 'StatusDot',
         useCases: [
+          _widgetbook.WidgetbookUseCase(
+            name: 'custom colour and hollow',
+            builder: _storm_widgetbook_use_cases_status_dot.statusDotCustom,
+          ),
           _widgetbook.WidgetbookUseCase(
             name: 'default',
             builder: _storm_widgetbook_use_cases_status_dot.statusDotDefault,

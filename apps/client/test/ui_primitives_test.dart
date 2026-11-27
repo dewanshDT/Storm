@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storm/ui/settings/settings_widgets.dart' show TextAction;
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/widgets.dart';
 
@@ -147,4 +148,37 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('migrated agent pieces', () {
+    testWidgets('banner, dots and tag overrides render', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              NoticeBanner(child: Text('notice')),
+              StatusDot(color: Colors.grey, hollow: true),
+              OutlineTag(
+                label: 'Starts agents',
+                radius: 12,
+                trailing: Icon(Icons.expand_more),
+                trailingGap: 4,
+              ),
+              TextActionProbe(),
+            ],
+          ),
+        ),
+      );
+      expect(find.text('notice'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+}
+
+class TextActionProbe extends StatelessWidget {
+  const TextActionProbe({super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      TextAction(label: 'Open', accent: true, lineHeight: 1.4, onTap: () {});
 }

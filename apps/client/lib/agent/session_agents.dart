@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../ui/breakpoints.dart';
 import '../ui/decision_strip.dart' show DecisionLayout;
+import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
@@ -189,7 +190,9 @@ class _AgentsPanelState extends ConsumerState<AgentsPanel> {
             _Divided(
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: AccentLink(
+                child: TextAction(
+                  accent: true,
+                  lineHeight: 1.4,
                   key: const Key('end-children'),
                   label: 'End all of them…',
                   danger: true,
@@ -346,7 +349,9 @@ class _ChildRow extends StatelessWidget {
             ),
           ),
           SizedBox(width: t.sp),
-          AccentLink(
+          TextAction(
+            accent: true,
+            lineHeight: 1.4,
             key: Key('agent-child-open-${k.id}'),
             label: work ? 'Work' : 'Open',
             onTap: () => openAgentSession(

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../ui/cards.dart' show NoticeBanner;
 import '../ui/controls.dart';
 import '../ui/session_status.dart' show StatusPill;
 import '../ui/settings/settings_widgets.dart';
@@ -432,18 +433,13 @@ class _Banner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
+    return NoticeBanner(
+      color: strong ? t.surface : t.amberSoft,
+      borderColor: strong ? t.danger : t.amber,
+      borderWidth: strong ? t.bw * 2 : t.bw,
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 1.75,
         vertical: t.sp * 1.5,
-      ),
-      decoration: BoxDecoration(
-        color: strong ? t.surface : t.amberSoft,
-        borderRadius: BorderRadius.circular(t.rControl),
-        border: Border.all(
-          color: strong ? t.danger : t.amber,
-          width: strong ? t.bw * 2 : t.bw,
-        ),
       ),
       child: Text(
         text,

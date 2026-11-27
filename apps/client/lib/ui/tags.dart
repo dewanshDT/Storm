@@ -29,6 +29,8 @@ class OutlineTag extends StatelessWidget {
     this.padding,
     this.lineHeight,
     this.wrap = false,
+    this.radius,
+    this.trailingGap,
   });
 
   final String label;
@@ -53,11 +55,17 @@ class OutlineTag extends StatelessWidget {
   /// Lets a long label wrap rather than ellipsise, as prose tags do.
   final bool wrap;
 
+  /// Overrides the [shape]'s corner radius.
+  final double? radius;
+
+  /// Space before [trailing]; `0.75 sp` by default.
+  final double? trailingGap;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final radius = BorderRadius.circular(
-      shape == OutlineTagShape.pill ? t.rPill : t.rInner,
+    final corners = BorderRadius.circular(
+      radius ?? (shape == OutlineTagShape.pill ? t.rPill : t.rInner),
     );
     final gap = SizedBox(width: t.sp * 0.75);
     final text = Text(
@@ -83,7 +91,7 @@ class OutlineTag extends StatelessWidget {
           EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.25),
       decoration: BoxDecoration(
         color: fill,
-        borderRadius: radius,
+        borderRadius: corners,
         border: borderColor == null
             ? null
             : Border.all(color: borderColor!, width: t.bw),
@@ -95,12 +103,15 @@ class OutlineTag extends StatelessWidget {
               children: [
                 if (leading != null) ...[leading!, gap],
                 Flexible(child: text),
-                if (trailing != null) ...[gap, trailing!],
+                if (trailing != null) ...[
+                  trailingGap == null ? gap : SizedBox(width: trailingGap),
+                  trailing!,
+                ],
               ],
             ),
     );
     if (onTap == null) return tag;
-    return Tappable(onTap: onTap, borderRadius: radius, child: tag);
+    return Tappable(onTap: onTap, borderRadius: corners, child: tag);
   }
 }
 

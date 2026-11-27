@@ -157,7 +157,12 @@ void main() {
 
     Color dot(WidgetTester tester) =>
         (tester
-                    .widget<Container>(find.byKey(const Key('spawn-chip-dot')))
+                    .widget<Container>(
+                      find.descendant(
+                        of: find.byKey(const Key('spawn-chip-dot')),
+                        matching: find.byType(Container),
+                      ),
+                    )
                     .decoration!
                 as BoxDecoration)
             .color!;

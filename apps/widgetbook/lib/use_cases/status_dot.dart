@@ -46,3 +46,23 @@ Widget statusDotAll(BuildContext context) => Padding(
     ],
   ),
 );
+
+@widgetbook.UseCase(
+  name: 'custom colour and hollow',
+  type: StatusDot,
+  path: _path,
+)
+Widget statusDotCustom(BuildContext context) {
+  final t = context.tokens;
+  return Padding(
+    padding: const EdgeInsets.all(16),
+    child: Row(
+      spacing: 16,
+      children: [
+        StatusDot(color: t.text2, size: 12),
+        StatusDot(color: t.text3, hollow: true, size: 12),
+        StatusDot(color: t.accent, size: 12),
+      ],
+    ),
+  );
+}

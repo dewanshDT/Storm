@@ -169,6 +169,7 @@ class TextAction extends StatelessWidget {
     this.accent = false,
     this.danger = false,
     this.large = false,
+    this.lineHeight,
   });
 
   final String label;
@@ -176,6 +177,7 @@ class TextAction extends StatelessWidget {
   final bool accent;
   final bool danger;
   final bool large;
+  final double? lineHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -196,6 +198,7 @@ class TextAction extends StatelessWidget {
           style: TextStyle(
             fontFamily: StormTokens.sansFamily,
             fontSize: large ? t.uiSize : t.codeSize,
+            height: lineHeight,
             color: onTap == null ? t.text3 : color,
           ),
         ),

@@ -8,8 +8,12 @@ import '../router.dart';
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/decision_strip.dart';
+import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart' show StormPopover, showStormPopover;
+import '../ui/cards.dart' show NoticeBanner;
+import '../ui/status.dart' show StatusDot;
+import '../ui/tags.dart' show OutlineTag;
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem, PopoverTone;
 import 'agent_api.dart' show AgentRefusal;
@@ -50,28 +54,15 @@ class AttentionTag extends StatelessWidget {
     final label = attentionLabel(kind);
     if (label == null) return const SizedBox.shrink();
     final t = context.tokens;
-    return Container(
+    final warn = kind == 'blocked' || kind == 'usage_limit';
+    return OutlineTag(
       key: Key('attention-$kind'),
+      label: label,
+      color: warn ? t.amber : t.accent,
+      fill: warn ? t.amberSoft : t.accentSoft,
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 0.75,
         vertical: t.sp * 0.125,
-      ),
-      decoration: BoxDecoration(
-        color: kind == 'blocked' || kind == 'usage_limit'
-            ? t.amberSoft
-            : t.accentSoft,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: agentMono(
-          t,
-          color: kind == 'blocked' || kind == 'usage_limit'
-              ? t.amber
-              : t.accent,
-        ),
       ),
     );
   }
@@ -354,46 +345,30 @@ class _SpawnChipState extends ConsumerState<SpawnChip> {
       label: 'Starts agents, ${on ? 'on' : 'off'}',
       excludeSemantics: true,
       onTap: _menu,
-      child: InkWell(
-        key: _anchor,
-        onTap: _menu,
-        borderRadius: BorderRadius.circular(999),
-        child: Container(
-          key: const Key('spawn-chip'),
+      child: KeyedSubtree(
+        key: const Key('spawn-chip'),
+        child: OutlineTag(
+          key: _anchor,
+          label: 'Starts agents',
+          color: t.text2,
+          borderColor: t.border,
           padding: EdgeInsets.symmetric(
             horizontal: t.sp * 1.125,
             vertical: t.sp * 0.25,
           ),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: t.border, width: t.bw),
+          lineHeight: 1.3,
+          leading: StatusDot(
+            key: const Key('spawn-chip-dot'),
+            color: on ? t.accent : t.text3,
+            size: t.sp * 0.75,
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                key: const Key('spawn-chip-dot'),
-                width: t.sp * 0.75,
-                height: t.sp * 0.75,
-                decoration: BoxDecoration(
-                  color: on ? t.accent : t.text3,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              SizedBox(width: t.sp * 0.75),
-              Text(
-                'Starts agents',
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text2,
-                  height: 1.3,
-                ),
-              ),
-              SizedBox(width: t.sp * 0.5),
-              Icon(LucideIcons.chevron_down, size: t.labelSize, color: t.text3),
-            ],
+          trailing: Icon(
+            LucideIcons.chevron_down,
+            size: t.labelSize,
+            color: t.text3,
           ),
+          trailingGap: t.sp * 0.5,
+          onTap: _menu,
         ),
       ),
     );
@@ -464,20 +439,26 @@ class _StartsAgentsAboutState extends ConsumerState<StartsAgentsAbout> {
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             if (live && sw.enabled)
-              AccentLink(
+              TextAction(
+                accent: true,
+                lineHeight: 1.4,
                 key: const Key('spawn-switch'),
                 label: 'Turn off',
                 onTap: _busy ? null : _off,
               )
             else if (live && canTurnOn)
-              AccentLink(
+              TextAction(
+                accent: true,
+                lineHeight: 1.4,
                 key: const Key('spawn-switch'),
                 label: 'Turn on',
                 onTap: () => askSpawnOn(context, ref, s, inPlace: _askHere),
               ),
             if (live && (sw.enabled || canTurnOn))
               Text(' · ', style: agentSans(t, color: t.text3)),
-            AccentLink(
+            TextAction(
+              accent: true,
+              lineHeight: 1.4,
               key: const Key('spawn-limits'),
               label: 'Change limits in Agents & hosts ›',
               onTap: () => openSpawnLimits(context),
@@ -496,50 +477,6 @@ class _StartsAgentsAboutState extends ConsumerState<StartsAgentsAbout> {
           ),
         ],
       ],
-    );
-  }
-}
-
-/// An accent text link in About and the Agents tab; [danger] for End all.
-class AccentLink extends StatelessWidget {
-  const AccentLink({
-    super.key,
-    required this.label,
-    required this.onTap,
-    this.danger = false,
-  });
-
-  final String label;
-  final VoidCallback? onTap;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Semantics(
-      button: true,
-      enabled: onTap != null,
-      label: label,
-      excludeSemantics: true,
-      onTap: onTap,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl),
-        child: Padding(
-          padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
-          child: Text(
-            label,
-            style: agentSans(
-              t,
-              color: onTap == null
-                  ? t.text3
-                  : danger
-                  ? t.danger
-                  : t.accent,
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -568,13 +505,7 @@ class _Banner extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final fill = accent ? t.accent : t.danger;
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: t.sp * 2, vertical: t.sp * 1.5),
-      decoration: BoxDecoration(
-        color: t.surface2,
-        borderRadius: BorderRadius.circular(t.rControl),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
+    return NoticeBanner(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -954,24 +885,18 @@ class SpawnHeaderLine extends ConsumerWidget {
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           if (parent != null)
-            InkWell(
+            OutlineTag(
               key: const Key('started-by'),
-              onTap: onParent == null ? null : () => onParent!(parent),
-              borderRadius: BorderRadius.circular(t.rControl),
-              child: Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: t.sp * 0.75,
-                  vertical: t.sp * 0.125,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(t.rControl),
-                  border: Border.all(color: t.accent, width: t.bw),
-                ),
-                child: Text(
+              label:
                   '↳ started by ${o?.byId(parent)?.displayName ?? 'its parent'} ›',
-                  style: agentMono(t, color: t.accent),
-                ),
+              color: t.accent,
+              borderColor: t.accent,
+              radius: t.rControl,
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp * 0.75,
+                vertical: t.sp * 0.125,
               ),
+              onTap: onParent == null ? null : () => onParent!(parent),
             ),
           AttentionTag(kind: attention),
         ],

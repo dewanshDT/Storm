@@ -8,9 +8,13 @@ import 'package:flutter/material.dart';
 
 import '../state/health.dart' show relativeTime;
 import '../ui/breakpoints.dart';
+import '../ui/cards.dart';
 import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
 import '../ui/settings/settings_widgets.dart';
+import '../ui/status.dart' show StatusDot;
+import '../ui/tags.dart' show OutlineTag, OutlineTagShape;
+import '../ui/tappable.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show ReadingMeasure;
 import 'agent_models.dart';
@@ -46,14 +50,10 @@ class HostDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
-      width: t.sp,
-      height: t.sp,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: online ? t.text2 : null,
-        border: online ? null : Border.all(color: t.text3, width: t.bw * 1.5),
-      ),
+    return StatusDot(
+      color: online ? t.text2 : t.text3,
+      hollow: !online,
+      size: t.sp,
     );
   }
 }
@@ -182,14 +182,10 @@ class _AgentsGridState extends State<AgentsGrid> {
           math.min(c.maxWidth * 0.25, c.maxWidth - minColumn * 5 - 2),
         );
         final column = math.max(minColumn, (c.maxWidth - hostWidth - 2) / 5);
-        return Container(
+        return StormCard(
           key: const Key('agents-grid'),
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            color: t.surface,
-            borderRadius: BorderRadius.circular(t.rCard),
-            border: Border.all(color: t.border, width: t.bw),
-          ),
+          clip: true,
+          padding: EdgeInsets.zero,
           child: Scrollbar(
             controller: _scroll,
             child: SingleChildScrollView(
@@ -235,55 +231,51 @@ class _AgentsGridState extends State<AgentsGrid> {
     bool top = true,
   }) => Container(
     key: key,
-    decoration: BoxDecoration(
-      color: background,
-      border: top
-          ? Border(
-              top: BorderSide(color: t.border, width: t.bw),
-            )
-          : null,
-    ),
-    child: Stack(
-      children: [
-        IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                width: hostWidth,
-                child: ExcludeSemantics(
-                  child: Visibility(
-                    visible: false,
-                    maintainSize: true,
-                    maintainAnimation: true,
-                    maintainState: true,
-                    child: measure,
+    decoration: BoxDecoration(color: background),
+    child: Hairline(
+      top: top,
+      child: Stack(
+        children: [
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  width: hostWidth,
+                  child: ExcludeSemantics(
+                    child: Visibility(
+                      visible: false,
+                      maintainSize: true,
+                      maintainAnimation: true,
+                      maintainState: true,
+                      child: measure,
+                    ),
                   ),
                 ),
-              ),
-              ...rest,
-            ],
-          ),
-        ),
-        Positioned(
-          left: pin,
-          top: 0,
-          bottom: 0,
-          width: hostWidth,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: background,
-              // Once the agents scroll under it, an edge says where.
-              border: pin > 0
-                  ? Border(
-                      right: BorderSide(color: t.border, width: t.bw),
-                    )
-                  : null,
+                ...rest,
+              ],
             ),
-            child: host,
           ),
-        ),
-      ],
+          Positioned(
+            left: pin,
+            top: 0,
+            bottom: 0,
+            width: hostWidth,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: background,
+                // Once the agents scroll under it, an edge says where.
+                border: pin > 0
+                    ? Border(
+                        right: BorderSide(color: t.border, width: t.bw),
+                      )
+                    : null,
+              ),
+              child: host,
+            ),
+          ),
+        ],
+      ),
     ),
   );
 
@@ -453,21 +445,13 @@ class DefaultTag extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
+    return OutlineTag(
+      label: 'default',
+      color: t.accent,
+      borderColor: t.accent,
+      shape: OutlineTagShape.tag,
       padding: EdgeInsets.symmetric(horizontal: t.sp * 0.625),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(t.rControl * 0.5),
-        border: Border.all(color: t.accent, width: t.bw),
-      ),
-      child: Text(
-        'default',
-        style: TextStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize,
-          color: t.accent,
-          height: 1.3,
-        ),
-      ),
+      lineHeight: 1.3,
     );
   }
 }
@@ -1002,14 +986,11 @@ class _HostDetailsState extends State<HostDetails> {
           );
 
     Widget strip({required Key key, required List<Widget> children}) =>
-        Container(
+        StormCard(
           key: key,
-          padding: EdgeInsets.all(t.sp * 1.5),
-          decoration: BoxDecoration(
-            color: t.danger.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(t.rControl),
-            border: Border.all(color: t.danger, width: t.bw),
-          ),
+          color: t.danger.withValues(alpha: 0.08),
+          radius: t.rControl,
+          borderColor: t.danger,
           child: Wrap(
             spacing: t.sp * 1.5,
             runSpacing: t.sp,
@@ -1259,42 +1240,37 @@ class LimitStepper extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     Widget step(String glyph, String tip, Key key, VoidCallback? onTap) =>
-        Tooltip(
-          message: tip,
-          child: InkWell(
-            key: key,
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(t.rControl * 0.6),
-            child: SizedBox(
-              width: t.sp * 2.75,
-              height: t.sp * 2.75,
-              child: Center(
-                child: Text(
-                  glyph,
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.codeSize,
-                    color: onTap == null
-                        ? t.text3.withValues(alpha: 0.5)
-                        : t.text3,
-                  ),
+        Tappable(
+          key: key,
+          tooltip: tip,
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(t.rChip),
+          child: SizedBox(
+            width: t.sp * 2.75,
+            height: t.sp * 2.75,
+            child: Center(
+              child: Text(
+                glyph,
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.codeSize,
+                  color: onTap == null
+                      ? t.text3.withValues(alpha: 0.5)
+                      : t.text3,
                 ),
               ),
             ),
           ),
         );
-    return Container(
+    return StormCard(
       key: Key('limit-$id-stepper'),
+      color: t.surface2,
+      radius: t.rControl,
       padding: EdgeInsets.fromLTRB(
         t.sp * 1.5,
         t.sp * 0.25,
         t.sp * 0.5,
         t.sp * 0.25,
-      ),
-      decoration: BoxDecoration(
-        color: t.surface2,
-        borderRadius: BorderRadius.circular(t.rControl),
-        border: Border.all(color: t.border, width: t.bw),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1735,54 +1711,53 @@ class HostSection extends StatelessWidget {
     final t = context.tokens;
     final h = host;
     final revoked = h.status == 'revoked';
-    return Container(
-      margin: EdgeInsets.only(bottom: t.sp * 2),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: t.surface,
-        borderRadius: BorderRadius.circular(t.rCard),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Opacity(
-            opacity: revoked ? 0.75 : 1,
-            child: InkWell(
-              key: Key('host-cell-${h.id}'),
-              onTap: revoked ? null : onSelect,
-              child: Padding(
-                padding: EdgeInsets.all(t.sp * 2),
-                child: HostLabel(host: h),
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * 2),
+      child: StormCard(
+        clip: true,
+        padding: EdgeInsets.zero,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Opacity(
+              opacity: revoked ? 0.75 : 1,
+              child: Tappable(
+                key: Key('host-cell-${h.id}'),
+                onTap: revoked ? null : onSelect,
+                minHitSize: 0,
+                child: Padding(
+                  padding: EdgeInsets.all(t.sp * 2),
+                  child: HostLabel(host: h),
+                ),
               ),
             ),
-          ),
-          if (revoked)
-            Padding(
-              padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
-              child: RevokedActions(
-                host: h,
-                hostAdmin: hostAdmin,
-                onReenroll: onReenroll,
-                onRemove: onRemove,
+            if (revoked)
+              Padding(
+                padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
+                child: RevokedActions(
+                  host: h,
+                  hostAdmin: hostAdmin,
+                  onReenroll: onReenroll,
+                  onRemove: onRemove,
+                ),
+              )
+            else
+              for (final a in kInstallableAgents)
+                _PhoneAgentRow(
+                  host: h,
+                  agent: a,
+                  cell: agentCell(h, a, runs['${h.id}/$a']),
+                  isDefault: a == defaultProvider,
+                  onTap: () => onOpen(a),
+                ),
+            if (expanded && details != null)
+              Container(
+                color: t.surface2,
+                padding: EdgeInsets.all(t.sp * 1.5),
+                child: details,
               ),
-            )
-          else
-            for (final a in kInstallableAgents)
-              _PhoneAgentRow(
-                host: h,
-                agent: a,
-                cell: agentCell(h, a, runs['${h.id}/$a']),
-                isDefault: a == defaultProvider,
-                onTap: () => onOpen(a),
-              ),
-          if (expanded && details != null)
-            Container(
-              color: t.surface2,
-              padding: EdgeInsets.all(t.sp * 1.5),
-              child: details,
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1807,15 +1782,12 @@ class _PhoneAgentRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final id = '${host.id}-$agent';
-    return InkWell(
+    return Tappable(
       key: Key('agent-row-$id'),
       onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: t.border, width: t.bw),
-          ),
-        ),
+      minHitSize: 0,
+      child: Hairline(
+        top: true,
         padding: EdgeInsets.symmetric(
           horizontal: t.sp * 2,
           vertical: t.sp * 1.5,
