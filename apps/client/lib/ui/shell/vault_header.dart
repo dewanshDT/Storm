@@ -10,6 +10,7 @@ import '../../state/health.dart' show syncLine;
 import '../../state/vault_config.dart' show setVaultAccent;
 import '../../sync/sync_engine.dart';
 import '../accents.dart';
+import '../settings/settings_widgets.dart' show TextAction;
 import '../surfaces.dart';
 import '../tokens.dart';
 import '../widgets.dart';
@@ -280,13 +281,14 @@ class SyncNowLine extends ConsumerWidget {
             ),
           ),
           Text(' · ', style: style),
-          GestureDetector(
+          TextAction(
             key: const Key('place-sync-now'),
+            label: 'Sync now',
+            mono: true,
             onTap: () async {
               await ref.read(syncEngineProvider).sync();
               ref.invalidate(treeProvider);
             },
-            child: Text('Sync now', style: style.copyWith(color: t.text2)),
           ),
         ],
       ),

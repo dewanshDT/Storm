@@ -11,6 +11,7 @@ import '../state/agent_writes.dart' show noteProvenanceProvider;
 import '../state/app_state.dart' show activeVaultProvider, openNoteIdProvider;
 import '../state/health.dart' show relativeTime;
 import 'controls.dart';
+import 'tappable.dart';
 import 'tokens.dart';
 import 'widgets.dart' show SaveTone;
 
@@ -89,19 +90,18 @@ class DrawerToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        key: const Key('drawer-toggle'),
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl),
-        child: Padding(
-          padding: EdgeInsets.all(t.sp * 0.75),
-          child: Icon(
-            LucideIcons.panel_right,
-            size: t.bodySize * 1.0625,
-            color: open ? t.text2 : t.text3,
-          ),
+    return Tappable(
+      key: const Key('drawer-toggle'),
+      tooltip: tooltip,
+      semanticLabel: tooltip,
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(t.rControl),
+      child: Padding(
+        padding: EdgeInsets.all(t.sp * 0.75),
+        child: Icon(
+          LucideIcons.panel_right,
+          size: t.bodySize * 1.0625,
+          color: open ? t.text2 : t.text3,
         ),
       ),
     );
@@ -206,21 +206,12 @@ class ProvenanceLink extends StatelessWidget {
       ),
     );
     if (!linked) return label;
-    return Semantics(
-      container: true,
+    return Tappable(
+      key: const Key('provenance-link'),
       link: true,
-      label: text,
-      excludeSemantics: true,
+      semanticLabel: text,
       onTap: open,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          key: const Key('provenance-link'),
-          behavior: HitTestBehavior.opaque,
-          onTap: open,
-          child: label,
-        ),
-      ),
+      child: label,
     );
   }
 }
