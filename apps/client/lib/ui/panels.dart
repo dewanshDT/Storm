@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'controls.dart';
 import 'tokens.dart';
 
+export 'tags.dart' show MonoTag;
+
 /// Mono uppercase keys over `text` values (the session's About).
 class KeyValueList extends StatelessWidget {
   const KeyValueList({super.key, required this.rows});
@@ -168,36 +170,6 @@ class InlineConfirm extends StatelessWidget {
                   Align(alignment: Alignment.centerRight, child: actions),
                 ],
               ),
-      ),
-    );
-  }
-}
-
-/// A vault's name as a small outlined mono tag, for cross-vault rows.
-class MonoTag extends StatelessWidget {
-  const MonoTag(this.text, {super.key});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: t.sp * 0.75,
-        vertical: t.sp * 0.125,
-      ),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(t.rInner),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize,
-          color: t.text3,
-        ),
       ),
     );
   }

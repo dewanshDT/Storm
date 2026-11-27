@@ -3,7 +3,106 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'tappable.dart';
 import 'tokens.dart';
+
+enum OutlineTagShape { pill, tag }
+
+/// The one pill/tag primitive: [MonoTag], [StatusPill], [TagChip] and
+/// [VaultTag] are thin wrappers over it. A border is drawn only when
+/// [borderColor] is given.
+class OutlineTag extends StatelessWidget {
+  const OutlineTag({
+    super.key,
+    required this.label,
+    this.color,
+    this.tone = StormTone.neutral,
+    this.borderColor,
+    this.fill,
+    this.leading,
+    this.trailing,
+    this.onTap,
+    this.shape = OutlineTagShape.pill,
+    this.mono = true,
+    this.maxWidth,
+    this.minWidth,
+    this.padding,
+    this.lineHeight,
+    this.wrap = false,
+  });
+
+  final String label;
+
+  /// Text colour; defaults from [tone].
+  final Color? color;
+  final StormTone tone;
+  final Color? borderColor;
+  final Color? fill;
+  final Widget? leading;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+  final OutlineTagShape shape;
+  final bool mono;
+  final double? maxWidth;
+  final double? minWidth;
+
+  /// `sp` across, a quarter `sp` down, by default.
+  final EdgeInsetsGeometry? padding;
+  final double? lineHeight;
+
+  /// Lets a long label wrap rather than ellipsise, as prose tags do.
+  final bool wrap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final radius = BorderRadius.circular(
+      shape == OutlineTagShape.pill ? t.rPill : t.rInner,
+    );
+    final gap = SizedBox(width: t.sp * 0.75);
+    final text = Text(
+      label,
+      maxLines: wrap ? null : 1,
+      overflow: wrap ? TextOverflow.clip : TextOverflow.ellipsis,
+      style: TextStyle(
+        fontFamily: mono ? StormTokens.monoFamily : StormTokens.sansFamily,
+        fontSize: t.labelSize,
+        color: color ?? tone.color(t),
+        height: lineHeight,
+      ),
+    );
+    final tag = Container(
+      constraints: (maxWidth != null || minWidth != null)
+          ? BoxConstraints(
+              minWidth: minWidth ?? 0,
+              maxWidth: maxWidth ?? double.infinity,
+            )
+          : null,
+      padding:
+          padding ??
+          EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.25),
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: radius,
+        border: borderColor == null
+            ? null
+            : Border.all(color: borderColor!, width: t.bw),
+      ),
+      child: leading == null && trailing == null
+          ? text
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (leading != null) ...[leading!, gap],
+                Flexible(child: text),
+                if (trailing != null) ...[gap, trailing!],
+              ],
+            ),
+    );
+    if (onTap == null) return tag;
+    return Tappable(onTap: onTap, borderRadius: radius, child: tag);
+  }
+}
 
 /// A tag, as it appears inline in a note and in the tag browser.
 ///
@@ -20,27 +119,57 @@ class TagChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final chip = Container(
-      padding: EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.25),
-      decoration: BoxDecoration(
-        color: t.amberSoft,
-        borderRadius: BorderRadius.circular(t.rPill),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize,
-          color: t.amber,
-          height: 1.3,
-        ),
-      ),
-    );
-    if (onTap == null) return chip;
-    return InkWell(
+    return OutlineTag(
+      label: label,
+      color: t.amber,
+      fill: t.amberSoft,
+      lineHeight: 1.3,
+      wrap: true,
       onTap: onTap,
-      borderRadius: BorderRadius.circular(t.rPill),
-      child: chip,
+    );
+  }
+}
+
+/// A vault's name as a small outlined tag beside a cross-vault row.
+class VaultTag extends StatelessWidget {
+  const VaultTag(this.name, {super.key, this.color});
+
+  final String name;
+
+  /// Over `text3`, for a row whose ground `text3` is not readable on.
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return OutlineTag(
+      label: name,
+      color: color ?? t.text3,
+      borderColor: t.border,
+      shape: OutlineTagShape.tag,
+      padding: EdgeInsets.symmetric(horizontal: t.sp * 0.625),
+      lineHeight: 1.4,
+    );
+  }
+}
+
+/// A vault's name as a small outlined mono tag, for cross-vault rows.
+class MonoTag extends StatelessWidget {
+  const MonoTag(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return OutlineTag(
+      label: text,
+      borderColor: t.border,
+      shape: OutlineTagShape.tag,
+      padding: EdgeInsets.symmetric(
+        horizontal: t.sp * 0.75,
+        vertical: t.sp * 0.125,
+      ),
     );
   }
 }

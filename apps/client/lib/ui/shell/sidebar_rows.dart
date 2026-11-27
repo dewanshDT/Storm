@@ -2,37 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../tokens.dart';
 
-/// A vault's name as a small outlined tag beside a cross-vault row.
-class VaultTag extends StatelessWidget {
-  const VaultTag(this.name, {super.key, this.color});
-
-  final String name;
-
-  /// Over `text3`, for a row whose ground `text3` is not readable on.
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: t.sp * 0.625),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(t.rInner),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
-      child: Text(
-        name,
-        maxLines: 1,
-        style: TextStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize,
-          color: color ?? t.text3,
-          height: 1.4,
-        ),
-      ),
-    );
-  }
-}
+export '../tags.dart' show VaultTag;
 
 /// The tree's ▸ / ▾, drawn rather than typed: the glyphs are not in Plex.
 class Twisty extends StatelessWidget {

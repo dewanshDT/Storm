@@ -4,6 +4,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'tags.dart';
 import 'tokens.dart';
 
 class SessionStatusLook {
@@ -106,34 +107,16 @@ class StatusPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Container(
+    return OutlineTag(
+      label: label,
+      color: color,
+      borderColor: t.border,
+      leading: dot,
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 1.125,
         vertical: t.sp * 0.25,
       ),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(t.rPill),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dot != null) ...[dot!, SizedBox(width: t.sp * 0.75)],
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: StormTokens.monoFamily,
-                fontSize: t.labelSize,
-                color: color,
-                height: 1.3,
-              ),
-            ),
-          ),
-        ],
-      ),
+      lineHeight: 1.3,
     );
   }
 }
