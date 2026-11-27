@@ -10,6 +10,7 @@ the client.
 make widgetbook          # run it (linux or macOS desktop)
 make widgetbook-web      # build the web catalogue into apps/widgetbook/build/web
 make widgetbook-codegen  # regenerate lib/main.directories.g.dart
+make widgetbook-usage    # regenerate lib/usage.g.dart
 ```
 
 The toolbar's addons: **Theme** (every variant of every family, loaded from the
@@ -37,13 +38,29 @@ state as inputs, not on a stub of the app.
 ## Coverage gate
 
 `test/coverage_test.dart` fails when a public widget in the client's shared
-files has no use case. "Shared" is the `_shared` list at the top of that test
-(`controls.dart`, `widgets.dart`, `surfaces.dart`, `panels.dart`, `states.dart`
-and a few other building-block files); screens and one-feature widgets are not
-in it. To exempt a widget that cannot render on its own, add it to the
+files has no use case. "Shared" is `sharedFiles` in `tool/ui_usage.dart`, the same list the usage
+index scans (`controls.dart`, `widgets.dart`, `surfaces.dart`, `panels.dart`,
+`states.dart` and a few other building-block files); screens and one-feature
+widgets are not in it. To exempt a widget that cannot render on its own, add it to the
 `_allowed` map with the reason; the test also fails when an entry goes stale
 (the widget is gone, or now has a use case). A new shared file goes in
-`_shared`.
+`sharedFiles`.
+
+## Usage index
+
+`tool/ui_usage.dart` scans `apps/client/lib` and writes `lib/usage.g.dart`:
+where each public widget of the shared files (`sharedFiles`, the coverage gate's list too) is instantiated, and
+the one-off candidates, which are the `InkWell`, `GestureDetector` and
+`Container`/`DecoratedBox` with a `BoxDecoration` written outside those files.
+The catalogue's `[Index]` folder renders both: a table of shared components
+with their use counts (zero highlighted) and the candidates grouped by file,
+which is the backlog of hand-rolled controls to move onto shared components.
+The gallery, the defining file and generated files are not counted.
+
+It is a text scan that skips comments and strings, not an analyzer, so a
+component built through a tear-off or a helper is not seen. Run
+`make widgetbook-usage` after changing the client and commit the result;
+`make test-widgetbook` and CI regenerate it and fail on a diff.
 
 ## Notes
 

@@ -11,6 +11,8 @@
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
 
+import 'package:storm_widgetbook/index/usage_index.dart'
+    as _storm_widgetbook_index_usage_index;
 import 'package:storm_widgetbook/use_cases/accent_picker.dart'
     as _storm_widgetbook_use_cases_accent_picker;
 import 'package:storm_widgetbook/use_cases/brand_mark.dart'
@@ -417,6 +419,29 @@ final directories = <_widgetbook.WidgetbookNode>[
           _widgetbook.WidgetbookUseCase(
             name: 'off',
             builder: _storm_widgetbook_use_cases_storm_toggle.stormToggleOff,
+          ),
+        ],
+      ),
+    ],
+  ),
+  _widgetbook.WidgetbookCategory(
+    name: 'Index',
+    children: [
+      _widgetbook.WidgetbookComponent(
+        name: 'CandidateSite',
+        useCases: [
+          _widgetbook.WidgetbookUseCase(
+            name: 'one-off candidates',
+            builder: _storm_widgetbook_index_usage_index.oneOffCandidateIndex,
+          ),
+        ],
+      ),
+      _widgetbook.WidgetbookComponent(
+        name: 'UsageSite',
+        useCases: [
+          _widgetbook.WidgetbookUseCase(
+            name: 'shared components',
+            builder: _storm_widgetbook_index_usage_index.sharedUsageIndex,
           ),
         ],
       ),
